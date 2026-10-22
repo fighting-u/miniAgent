@@ -86,7 +86,9 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
             try:
                 # 这里是因为claude返回就是python字典，而openAI是json，要转换下
                 arguments = json.loads(tool_call.arguments)
+                print(f"Agent请求执行 PowerShell 命令：{arguments['command']}")
                 result = run_powershell(arguments["command"])
+                print(f"PowerShell 执行结果：{result}")
             except (json.JSONDecodeError, KeyError, TypeError) as error:
                 result = {"error": f"工具参数无效：{error}"}
 
@@ -98,9 +100,11 @@ def main() -> None:
     """加载配置，读取用户运行时输入并启动一次 Agent 任务。"""
     load_dotenv()
     base_url = os.getenv("BASE_URL")
-    api_key = os.getenv("OPENAI_API_KEY")
+    # api_key = os.getenv("OPENAI_API_KEY")
+    # qwen
+    api_key = os.getenv("DASHSCOPE_API_KEY")
     if not api_key:
-        raise RuntimeError("未找到 OPENAI_API_KEY，请先在 .env 中配置。")
+        raise RuntimeError("未找到 API_KEY，请先在 .env 中配置。")
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
@@ -112,7 +116,7 @@ def main() -> None:
         if user_request.lower() == "q":
             print("结束对话。")
             break
-        
+
         history.append({"role": "user", "content": user_request})
         agent_loop(client, history)
 
