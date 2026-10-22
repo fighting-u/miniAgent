@@ -1,7 +1,9 @@
 ## 项目说明
 这是一个学习项目，从零搭建1个agent。模仿codex，claude code，openclaw为主，主要学的是思想，harness工程。
-我会跟着教程做，但教程的代码是基于claude api的，所以你需要注意转化为openAI格式。
-以及我是windows环境，教程里用bash，而我们是powershell，也注意适配转化。
+我会跟着教程做，
+1. 但教程的代码是基于claude api的，所以你需要注意转化为openAI格式。
+2. 以及我是windows环境，教程里用bash，而我们是powershell，也注意适配转化。
+3. 教程里给agent/llm的提示，反馈等是英语，要转化为适配中文；
 
 ## 要求
 - 依赖相关的操作，你帮我改toml即可，uv lock，uv sync等命令我自己执行；

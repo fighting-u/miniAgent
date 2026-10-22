@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -15,6 +16,33 @@ POWERSHELL_TIMEOUT_SECONDS = 120
 
 # 文件工具允许访问的工作区根目录，使用程序启动时的当前目录。
 WORKDIR = Path.cwd().resolve()
+
+# 第一重闸门的 PowerShell 高危命令片段，命中后直接拒绝执行。
+DENY_LIST = [
+    "remove-item -recurse -force c:\\",
+    "remove-item -force -recurse c:\\",
+    "format-volume",
+    "clear-disk",
+    "initialize-disk",
+    "stop-computer",
+    "restart-computer",
+    "shutdown /s",
+    "shutdown /r",
+]
+
+# 用于识别 PowerShell 删除命令及其常用别名的正则表达式。
+DESTRUCTIVE_COMMAND_WORD = re.compile(
+    r"(?i)(?:^|[;&|()\r\n])\s*(?:remove-item|del|erase|rd|rmdir|clear-content)(?=\s|$|[;&|()])"
+)
+
+# 需要用户审批的 PowerShell 敏感操作关键词，匹配时忽略大小写。
+POWERSHELL_SENSITIVE_KEYWORDS = [
+    "set-content ",
+    "out-file ",
+    "set-acl ",
+    "icacls ",
+    "takeown ",
+]
 
 # 提供给模型的工具定义；parameters 使用 JSON Schema 描述模型可传入的参数。
 TOOLS = [
@@ -70,12 +98,6 @@ TOOLS = [
 # 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
 def run_powershell(command: str) -> str:
     """在当前项目目录执行 PowerShell 命令，并以字符串返回执行结果。"""
-    # 用小写关键词拦截常见的递归删除、磁盘格式化以及关机重启命令。
-    dangerous_commands = ["remove-item -recurse", "format-volume", "clear-disk", "stop-computer", "restart-computer", "shutdown", "reboot"]
-    normalized_command = command.lower()
-    if any(item in normalized_command for item in dangerous_commands):
-        return "检测到危险 PowerShell 命令，已阻止执行。"
-
     try:
         completed = subprocess.run(
             [
@@ -177,22 +199,53 @@ TOOL_HANDLERS = {
 }
 
 
+def contains_destructive_command(command: str) -> bool:
+    """判断 PowerShell 命令中是否包含删除或清空内容的操作。"""
+    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
+
+
+# 第二重闸门的敏感操作规则，命中后需要进入用户审批流程。
+PERMISSION_RULES = [
+    {
+        "tools": ["read_file", "write_file", "edit_file"],
+        "check": lambda args: not (WORKDIR / str(args.get("path", ""))).resolve().is_relative_to(WORKDIR),
+        "message": "访问工作区外的文件",
+    },
+    {
+        "tools": ["powershell"],
+        "check": lambda args: contains_destructive_command(str(args.get("command", "")))
+        or any(
+            keyword in str(args.get("command", "")).casefold()
+            for keyword in POWERSHELL_SENSITIVE_KEYWORDS
+        ),
+        "message": "潜在的破坏性 PowerShell 命令",
+    },
+]
+
+
 def check_deny_list(command: str) -> str | None:
-    """检查命令是否命中硬拒绝规则；具体规则后续补充。"""
-    # TODO: 闸门 1，增加高危命令的规则匹配或 LLM 审计。
+    """检查 PowerShell 命令是否命中硬拒绝名单。"""
+    normalized_command = command.casefold()
+    for pattern in DENY_LIST:
+        if pattern in normalized_command:
+            return f"Blocked: '{pattern}' is on the deny list"
     return None
 
 
 def check_rules(tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    """检查工具调用是否属于需要用户审批的敏感操作；具体规则后续补充。"""
-    # TODO: 闸门 2，按工具类型、执行范围和敏感路径判断操作风险。
+    """按照权限规则检查工具调用是否需要用户审批。"""
+    for rule in PERMISSION_RULES:
+        if tool_name in rule["tools"] and rule["check"](tool_input):
+            return rule["message"]
     return None
 
 
 def ask_user(tool_name: str, tool_input: dict[str, Any], reason: str) -> str:
-    """请求用户审批敏感工具调用；具体交互逻辑后续补充。"""
-    # TODO: 闸门 3，向用户展示工具、参数和风险原因，并接收 yes 或 no。
-    return "deny"
+    """向用户展示敏感操作信息，并请求明确批准或拒绝。"""
+    print(f"\n⚠  {reason}")
+    print(f"   Tool: {tool_name}({tool_input})")
+    choice = input("   是否允许? [y/N] ").strip().lower()
+    return "allow" if choice in ("y", "yes") else "deny"
 
 
 def check_permission(tool_name: str, tool_input: dict[str, Any]) -> bool:
@@ -236,9 +289,11 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
                 arguments = json.loads(tool_call.arguments)
                 # \033[33m 是 ANSI 转义码，用于在终端中显示黄色文本，\033[0m 用于重置颜色。
                 print(f"\033[33m> Agent请求调用工具：{tool_call.name}\033[0m")
+                print(f"\033[33m调用参数：{arguments}\033[0m")
 
                 # 工具执行前先经过权限判断和安全审查。
                 if not check_permission(tool_call.name, arguments):
+                    # todo: 这里给llm的反馈太笼统了，后续可优化细分
                     results.append(
                         {"type": "function_call_output", "call_id": tool_call.call_id, "output": "Permission denied."}
                     )
