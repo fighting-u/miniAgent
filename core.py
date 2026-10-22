@@ -1,7 +1,6 @@
 import json
 import os
 from pathlib import Path
-from pyexpat.errors import messages
 import subprocess
 from typing import Any
 
@@ -21,8 +20,8 @@ WORKDIR = Path.cwd().resolve()
 TOOLS = [
     {
         "type": "function",
-        "name": "bash",
-        "description": "Run a shell command.",
+        "name": "powershell",
+        "description": "Run a PowerShell command.",
         "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": False},
         "strict": True,
     },
@@ -69,7 +68,7 @@ TOOLS = [
 
 
 # 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
-def run_bash(command: str) -> str:
+def run_powershell(command: str) -> str:
     """在当前项目目录执行 PowerShell 命令，并以字符串返回执行结果。"""
     # 用小写关键词拦截常见的递归删除、磁盘格式化以及关机重启命令。
     dangerous_commands = ["remove-item -recurse", "format-volume", "clear-disk", "stop-computer", "restart-computer", "shutdown", "reboot"]
@@ -170,12 +169,49 @@ def run_glob(pattern: str) -> str:
 
 # 工具名称到具体处理函数的分发表。
 TOOL_HANDLERS = {
-    "bash": run_bash,
+    "powershell": run_powershell,
     "read_file": run_read,
     "write_file": run_write,
     "edit_file": run_edit,
     "glob": run_glob,
 }
+
+
+def check_deny_list(command: str) -> str | None:
+    """检查命令是否命中硬拒绝规则；具体规则后续补充。"""
+    # TODO: 闸门 1，增加高危命令的规则匹配或 LLM 审计。
+    return None
+
+
+def check_rules(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """检查工具调用是否属于需要用户审批的敏感操作；具体规则后续补充。"""
+    # TODO: 闸门 2，按工具类型、执行范围和敏感路径判断操作风险。
+    return None
+
+
+def ask_user(tool_name: str, tool_input: dict[str, Any], reason: str) -> str:
+    """请求用户审批敏感工具调用；具体交互逻辑后续补充。"""
+    # TODO: 闸门 3，向用户展示工具、参数和风险原因，并接收 yes 或 no。
+    return "deny"
+
+
+def check_permission(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    """依次经过硬拒绝、敏感操作识别和用户审批三道权限闸门。"""
+    # 闸门 1：命中高危规则时直接拒绝。
+    if tool_name == "powershell":
+        reason = check_deny_list(str(tool_input.get("command", "")))
+        if reason:
+            print(f"\n⛔ {reason}")
+            return False
+
+    # 闸门 2 和 3：识别敏感操作，并交给用户审批。
+    reason = check_rules(tool_name, tool_input)
+    if reason:
+        decision = ask_user(tool_name, tool_input, reason)
+        if decision == "deny":
+            return False
+
+    return True
 
 
 def agent_loop(client: OpenAI, messages: list[Any]) -> None:
@@ -200,6 +236,14 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
                 arguments = json.loads(tool_call.arguments)
                 # \033[33m 是 ANSI 转义码，用于在终端中显示黄色文本，\033[0m 用于重置颜色。
                 print(f"\033[33m> Agent请求调用工具：{tool_call.name}\033[0m")
+
+                # 工具执行前先经过权限判断和安全审查。
+                if not check_permission(tool_call.name, arguments):
+                    results.append(
+                        {"type": "function_call_output", "call_id": tool_call.call_id, "output": "Permission denied."}
+                    )
+                    continue
+
                 handler = TOOL_HANDLERS.get(tool_call.name)
                 output = str(handler(**arguments)) if handler else f"未知工具: {tool_call.name}"
                 print(output[:200])
