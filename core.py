@@ -88,7 +88,8 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
                 arguments = json.loads(tool_call.arguments)
                 print(f"Agent请求执行 PowerShell 命令：{arguments['command']}")
                 result = run_powershell(arguments["command"])
-                print(f"PowerShell 执行结果：{result}")
+                # 截断下
+                print(f"PowerShell 执行结果：{result['stdout'][:500]}\n{result['stderr'][:500]}")
             except (json.JSONDecodeError, KeyError, TypeError) as error:
                 result = {"error": f"工具参数无效：{error}"}
 
