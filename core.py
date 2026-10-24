@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,9 @@ INSTRUCTIONS = """你是一个运行在 Windows 环境中的智能体助手，�
 
 # PowerShell 单次执行的最长时间，单位为秒。
 POWERSHELL_TIMEOUT_SECONDS = 120
+
+# 连续多少轮未更新计划后，向模型追加一次规划提醒。
+PLAN_REMINDER_INTERVAL = 3
 
 # 文件工具允许访问的工作区根目录，使用程序启动时的当前目录。
 WORKDIR = Path.cwd().resolve()
@@ -91,6 +95,36 @@ TOOLS = [
         "name": "glob",
         "description": "Find files matching a glob pattern; ** matches recursively.",
         "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"], "additionalProperties": False},
+    },
+    {
+        "type": "function",
+        "name": "update_plan",
+        "description": "创建或更新任务计划，适合长程任务或包含多条指令的请求。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "plan": {
+                    "type": "array",
+                    "description": "完整的计划清单，每次调用都会覆盖现有计划。",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string", "description": "计划项内容。"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                                "description": "计划项状态。",
+                            },
+                        },
+                        "required": ["content", "status"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["plan"],
+            "additionalProperties": False,
+        },
+        "strict": True,
     },
 ]
 
@@ -189,6 +223,84 @@ def run_glob(pattern: str) -> str:
         return f"Error: {error}"
 
 
+class PlanManager:
+    """保存、校验并展示当前任务计划。"""
+
+    def __init__(self) -> None:
+        """初始化空的计划清单。"""
+        self.items: list[dict[str, str]] = []
+
+    def update(self, plan: list[Any] | str) -> str:
+        """校验并整体替换当前计划，然后返回渲染后的计划文本。"""
+        if isinstance(plan, str):
+            try:
+                plan = json.loads(plan)
+            except json.JSONDecodeError:
+                try:
+                    plan = ast.literal_eval(plan)
+                except (SyntaxError, ValueError) as error:
+                    raise ValueError("计划必须是列表或 JSON 数组字符串。") from error
+
+        if not isinstance(plan, list):
+            raise ValueError("计划必须是列表。")
+        if len(plan) > 20:
+            raise ValueError("计划项最多允许 20 条。")
+
+        validated: list[dict[str, str]] = []
+        in_progress_count = 0
+        for index, item in enumerate(plan):
+            if not isinstance(item, dict):
+                raise ValueError(f"plan[{index}] 必须是对象。")
+
+            content = str(item.get("content", "")).strip()
+            status = str(item.get("status", "pending")).lower()
+            if not content:
+                raise ValueError(f"plan[{index}] 缺少 content。")
+            if status not in ("pending", "in_progress", "completed"):
+                raise ValueError(f"plan[{index}] 的状态 '{status}' 无效。")
+            if status == "in_progress":
+                in_progress_count += 1
+            validated.append({"content": content, "status": status})
+
+        if in_progress_count > 1:
+            raise ValueError("同一时间只能有一条计划处于 in_progress 状态。")
+
+        self.items = validated
+        return self.render()
+
+    def render(self) -> str:
+        """把当前计划渲染为便于模型和终端阅读的文本。"""
+        if not self.items:
+            return "暂无计划。"
+
+        lines = []
+        for item in self.items:
+            marker = {
+                "pending": "[ ]",
+                "in_progress": "[>]",
+                "completed": "[x]",
+            }[item["status"]]
+            lines.append(f"{marker} {item['content']}")
+
+        completed_count = sum(item["status"] == "completed" for item in self.items)
+        lines.append(f"\n（已完成 {completed_count}/{len(self.items)}）")
+        return "\n".join(lines)
+
+
+# 当前 Agent 任务共享的计划管理器。
+PLAN = PlanManager()
+
+
+def run_update_plan(plan: list[Any] | str) -> str:
+    """执行计划更新工具，并在终端中展示更新后的计划。"""
+    try:
+        output = PLAN.update(plan)
+    except ValueError as error:
+        return f"错误：{error}"
+    print(f"\n\033[33m## 当前计划\033[0m\n{output}")
+    return output
+
+
 # 工具名称到具体处理函数的分发表。
 TOOL_HANDLERS = {
     "powershell": run_powershell,
@@ -196,6 +308,7 @@ TOOL_HANDLERS = {
     "write_file": run_write,
     "edit_file": run_edit,
     "glob": run_glob,
+    "update_plan": run_update_plan,
 }
 
 # Hook 事件注册表，用于在核心流程的固定位置挂载外部扩展逻辑。
@@ -353,6 +466,8 @@ register_hook("Stop", summary_hook)
 
 def agent_loop(client: OpenAI, messages: list[Any]) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
+    # 记录连续多少轮工具调用没有使用计划工具。
+    rounds_since_plan = 0
     while True:
         # 发送当前对话，请求模型继续推理或调用工具。
         response = client.responses.create(model=os.getenv("MODEL"), instructions=INSTRUCTIONS, input=messages, tools=TOOLS)
@@ -372,6 +487,7 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
 
         # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
         results = []
+        used_plan = False
         for tool_call in tool_calls:
             try:
                 # 这里是因为claude返回就是python字典，而openAI是json，要转换下
@@ -389,10 +505,24 @@ def agent_loop(client: OpenAI, messages: list[Any]) -> None:
                 handler = TOOL_HANDLERS.get(tool_call.name)
                 output = str(handler(**arguments)) if handler else f"未知工具: {tool_call.name}"
                 trigger_hooks("PostToolUse", tool_call, output)
+
+                if tool_call.name == "update_plan":
+                    used_plan = True
             except (json.JSONDecodeError, TypeError) as error:
                 output = f"工具参数无效：{error}"
 
             results.append({"type": "function_call_output", "call_id": tool_call.call_id, "output": output})
+
+        # 连续多轮未更新计划时，把当前计划和更新提醒一并追加给模型。
+        rounds_since_plan = 0 if used_plan else rounds_since_plan + 1
+        if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
+            results.append(
+                {
+                    "role": "user",
+                    "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
+                }
+            )
+            rounds_since_plan = 0
         messages.extend(results)
 
 
