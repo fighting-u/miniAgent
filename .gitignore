@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 
 docs/记录.md
+docs/imgs/记录/*

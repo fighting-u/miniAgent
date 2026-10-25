@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from skill import SKILL_LOADER
+
 
 # PowerShell 单次执行的最长时间，单位为秒。
 POWERSHELL_TIMEOUT_SECONDS = 120
@@ -86,6 +88,18 @@ TOOLS = [
                 }
             },
             "required": ["plan"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "load_skill",
+        "description": "按名称读取某项技能的完整说明。仅在技能适用于当前任务时调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "系统提示词中列出的技能名称。"}},
+            "required": ["name"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -273,4 +287,5 @@ TOOL_HANDLERS = {
     "edit_file": run_edit,
     "glob": run_glob,
     "update_plan": run_update_plan,
+    "load_skill": SKILL_LOADER.load,
 }

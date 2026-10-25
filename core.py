@@ -6,13 +6,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from hook import trigger_hooks
+from system_prompt import SYSTEM
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
 
 # 系统提示词
-INSTRUCTIONS = """你是一个运行在 Windows 环境中的智能体助手，帮助用户完成任务。
-三步以上的复杂任务或者一次提出多个任务时，建议使用 update_plan 工具先创建计划。
-"""
+INSTRUCTIONS = SYSTEM
 
 # 连续多少轮未更新计划后，向模型追加一次规划提醒。
 PLAN_REMINDER_INTERVAL = 3
