@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 .task_outputs/
 .transcripts/
+logs/
 
 docs/记录.md
 docs/imgs/记录/*

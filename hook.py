@@ -1,8 +1,12 @@
+import logging
 import re
 from typing import Any, Callable
 
 from tools import WORKDIR
 
+
+# 当前模块使用的日志记录器。
+logger = logging.getLogger(__name__)
 
 # 第一重闸门的 PowerShell 高危命令片段，命中后直接拒绝执行。
 DENY_LIST = [
@@ -97,10 +101,12 @@ def check_rules(tool_name: str, tool_input: dict[str, Any]) -> str | None:
 
 def ask_user(tool_name: str, tool_input: dict[str, Any], reason: str) -> str:
     """向用户展示敏感操作信息，并请求明确批准或拒绝。"""
-    print(f"\n⚠  {reason}")
+    logger.warning("需要权限审批：%s", reason)
     print(f"   Tool: {tool_name}({tool_input})")
     choice = input("   是否允许? [y/N] ").strip().lower()
-    return "allow" if choice in ("y", "yes") else "deny"
+    decision = "allow" if choice in ("y", "yes") else "deny"
+    logger.info("工具 %s 的权限审批结果：%s", tool_name, decision)
+    return decision
 
 
 def check_permission(tool_name: str, tool_input: dict[str, Any]) -> bool:
@@ -109,7 +115,7 @@ def check_permission(tool_name: str, tool_input: dict[str, Any]) -> bool:
     if tool_name == "powershell":
         reason = check_deny_list(str(tool_input.get("command", "")))
         if reason:
-            print(f"\n⛔ {reason}")
+            logger.warning("PowerShell 命令被硬拒绝规则拦截：%s", reason)
             return False
 
     # 闸门 2 和 3：识别敏感操作，并交给用户审批。
@@ -131,28 +137,27 @@ def permission_hook(tool_call: Any, arguments: dict[str, Any]) -> str | None:
 
 def workdir_log_hook() -> None:
     """在读取用户输入前输出当前工作目录。"""
-    print(f"\033[90m[Hook] 当前工作目录：{WORKDIR}\033[0m")
+    logger.info("[Hook] 当前工作目录：%s", WORKDIR)
     return None
 
 
 def tool_request_log_hook(tool_call: Any, arguments: dict[str, Any]) -> None:
     """在工具执行前输出模型请求的工具名称和参数预览。"""
     arguments_preview = str(list(arguments.values())[:2])[:60]
-    # \033[33m 是 ANSI 转义码，用于在终端中显示黄色文本，\033[0m 用于重置颜色。
-    print(f"\033[33m[Hook] 模型请求调用工具：{tool_call.name}({arguments_preview})\033[0m")
+    logger.info("[Hook] 模型请求调用工具：%s(%s)", tool_call.name, arguments_preview)
     return None
 
 
 def tool_output_log_hook(tool_call: Any, output: str) -> None:
     """在工具执行后输出工具结果的前 200 个字符。"""
-    print(f"\033[90m[Hook] {tool_call.name} 输出预览：{output[:200]}\033[0m")
+    logger.info("[Hook] %s 输出预览：%s", tool_call.name, output[:200])
     return None
 
 
 def large_output_hook(tool_call: Any, output: str) -> None:
     """在工具输出超过十万个字符时输出提醒日志。"""
     if len(output) > 100_000:
-        print(f"\033[33m[Hook] {tool_call.name} 输出较大，共 {len(output)} 个字符\033[0m")
+        logger.warning("[Hook] %s 输出较大，共 %d 个字符", tool_call.name, len(output))
     return None
 
 
@@ -171,7 +176,7 @@ def summary_hook(messages: list[Any]) -> None:
         for message in messages[last_user_index + 1 :]
         if isinstance(message, dict) and message.get("type") == "function_call_output"
     )
-    print(f"\033[90m[Hook] 本轮请求共执行 {tool_count} 个工具\033[0m")
+    logger.info("[Hook] 本轮请求共产生 %d 个工具结果", tool_count)
     return None
 
 

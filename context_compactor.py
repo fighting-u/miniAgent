@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -6,6 +7,9 @@ from typing import Any
 
 from openai import OpenAI
 
+
+# 当前模块使用的日志记录器。
+logger = logging.getLogger(__name__)
 
 # 默认上下文字符阈值；字符数只是 token 数的低成本近似值。
 CONTEXT_CHAR_LIMIT = 50_000
@@ -186,6 +190,14 @@ class ContextCompactor:
         if total_chars <= TOOL_RESULT_BATCH_CHAR_LIMIT:
             return messages
 
+        before_chars = total_chars
+        persisted_count = 0
+        logger.info(
+            "[上下文压缩 1/5] 单轮工具结果共 %d 字符，超过 %d 字符预算",
+            before_chars,
+            TOOL_RESULT_BATCH_CHAR_LIMIT,
+        )
+
         for item in sorted(
             results,
             key=lambda result: len(str(self.item_value(result, "output", ""))),
@@ -199,7 +211,20 @@ class ContextCompactor:
             item["output"] = self.persisted_preview(
                 self.call_id(item) or "unknown", output, preview_chars=2_000
             )
+            persisted_count += 1
             total_chars = sum(len(str(self.item_value(result, "output", ""))) for result in results)
+        if persisted_count:
+            logger.info(
+                "[上下文压缩 1/5] 已转存 %d 条工具结果，单轮结果由 %d 字符降至 %d 字符",
+                persisted_count,
+                before_chars,
+                total_chars,
+            )
+        else:
+            logger.warning(
+                "[上下文压缩 1/5] 已触发，但没有单条超过 %d 字符的工具结果",
+                LARGE_RESULT_CHAR_LIMIT,
+            )
         return messages
 
     @classmethod
@@ -274,14 +299,22 @@ class ContextCompactor:
         if len(messages) <= max_messages:
             return messages
 
+        before_count = len(messages)
+        logger.info(
+            "[上下文压缩 2/5] 消息项共 %d 条，超过 %d 条限制",
+            before_count,
+            max_messages,
+        )
         head_end = 3
         tail_start = len(messages) - (max_messages - head_end - 1)
         head_end, tail_start = self.safe_snip_boundaries(messages, head_end, tail_start)
         if head_end >= tail_start:
+            logger.warning("[上下文压缩 2/5] 为保持模型输出和工具调用配对，本次未执行裁剪")
             return messages
 
         middle = messages[head_end:tail_start]
         if len(middle) == 1 and self.is_archive_marker(middle[0]):
+            logger.info("[上下文压缩 2/5] 待裁剪区域已经是有效归档标记，本次不重复归档")
             return messages
 
         transcript_path = self.write_transcript(messages)
@@ -289,10 +322,25 @@ class ContextCompactor:
             "role": "user",
             "content": f"[已裁剪 {len(middle)} 条消息，完整历史：{transcript_path}]",
         }
-        return [*messages[:head_end], marker, *messages[tail_start:]]
+        compacted_messages = [*messages[:head_end], marker, *messages[tail_start:]]
+        logger.info(
+            "[上下文压缩 2/5] 已裁剪 %d 条消息项，消息数由 %d 条降至 %d 条，完整历史：%s",
+            len(middle),
+            before_count,
+            len(compacted_messages),
+            transcript_path,
+        )
+        return compacted_messages
 
     def micro_compact(self, messages: list[Any], target_chars: int) -> list[Any]:
         """第三步：把最近三条以外、已被模型读取的旧工具结果压成纯路径。"""
+        before_chars = self.estimate_chars(messages)
+        compacted_count = 0
+        logger.info(
+            "[上下文压缩 3/5] 当前上下文约 %d 字符，开始压缩已读旧工具结果，目标 %d 字符",
+            before_chars,
+            target_chars,
+        )
         result_positions = [
             index
             for index, item in enumerate(messages)
@@ -312,10 +360,25 @@ class ContextCompactor:
             if path is None:
                 path = self.save_output(self.call_id(item) or "unknown", output)
             item["output"] = f"[较早的工具结果已保存到：{path}]"
+            compacted_count += 1
+        after_chars = self.estimate_chars(messages)
+        logger.info(
+            "[上下文压缩 3/5] 已压缩 %d 条旧工具结果，上下文由 %d 字符降至 %d 字符",
+            compacted_count,
+            before_chars,
+            after_chars,
+        )
         return messages
 
     def fit_tool_results(self, messages: list[Any], target_chars: int) -> list[Any]:
         """第四步：仅缩短本轮未读结果和第三步保留的最近三条已读结果。"""
+        before_chars = self.estimate_chars(messages)
+        compacted_count = 0
+        logger.info(
+            "[上下文压缩 4/5] 旧结果压缩后仍有 %d 字符，开始处理本轮及最近工具结果，目标 %d 字符",
+            before_chars,
+            target_chars,
+        )
         result_positions = [
             index
             for index, item in enumerate(messages)
@@ -347,6 +410,14 @@ class ContextCompactor:
             )
             if len(replacement) < len(output):
                 item["output"] = replacement
+                compacted_count += 1
+        after_chars = self.estimate_chars(messages)
+        logger.info(
+            "[上下文压缩 4/5] 已缩短 %d 条工具结果，上下文由 %d 字符降至 %d 字符",
+            compacted_count,
+            before_chars,
+            after_chars,
+        )
         return messages
 
     def summary_input(self, messages: list[Any]) -> str:
@@ -391,22 +462,39 @@ class ContextCompactor:
 
     def compact_history(self, messages: list[Any], active_request: str) -> list[Any]:
         """第五步：归档全部历史，并用一条包含模型摘要的用户消息替换它。"""
+        before_chars = self.estimate_chars(messages)
         transcript = self.write_transcript(messages)
-        print(f"[完整历史已保存：{transcript}]")
+        logger.info("[上下文压缩 5/5] 完整历史已保存：%s", transcript)
         summary = self.summarize_history(messages)
-        return [self.summary_message("上下文已压缩", active_request, summary, transcript)]
+        compacted_messages = [
+            self.summary_message("上下文已压缩", active_request, summary, transcript)
+        ]
+        logger.info(
+            "[上下文压缩 5/5] 摘要压缩完成，上下文由 %d 字符降至 %d 字符",
+            before_chars,
+            self.estimate_chars(compacted_messages),
+        )
+        return compacted_messages
 
     def reactive_compact(self, messages: list[Any], active_request: str) -> list[Any]:
         """请求因上下文过长被拒绝时，总结旧历史并完整保留最近五条消息项。"""
+        before_chars = self.estimate_chars(messages)
         transcript = self.write_transcript(messages)
-        print(f"[完整历史已保存：{transcript}]")
+        logger.warning("[响应式上下文压缩] 完整历史已保存：%s", transcript)
         tail_start = max(0, len(messages) - KEEP_RECENT_MESSAGES)
         _, tail_start = self.safe_snip_boundaries(messages, 0, tail_start)
 
         old_history = messages[:tail_start] if tail_start else messages
         summary = self.summarize_history(old_history)
         compacted = self.summary_message("响应式上下文压缩", active_request, summary, transcript)
-        return [compacted, *messages[tail_start:]] if tail_start else [compacted]
+        compacted_messages = [compacted, *messages[tail_start:]] if tail_start else [compacted]
+        logger.warning(
+            "[响应式上下文压缩] 已保留最近 %d 条消息项，上下文由 %d 字符降至 %d 字符",
+            len(messages) - tail_start if tail_start else 0,
+            before_chars,
+            self.estimate_chars(compacted_messages),
+        )
+        return compacted_messages
 
     def prepare(self, messages: list[Any], active_request: str) -> list[Any]:
         """在每次模型请求前依次执行五步上下文压缩管线。"""
@@ -418,7 +506,11 @@ class ContextCompactor:
             if self.estimate_chars(messages) > CONTEXT_CHAR_LIMIT:
                 messages = self.fit_tool_results(messages, target_chars)
             if self.estimate_chars(messages) > CONTEXT_CHAR_LIMIT:
-                print(f"当前上下文约 {self.estimate_chars(messages)} 字符 ，超出限制，进行总结摘要压缩上下文")
+                logger.warning(
+                    "[上下文压缩 5/5] 确定性压缩后仍有 %d 字符，超过 %d 字符限制，开始生成摘要",
+                    self.estimate_chars(messages),
+                    CONTEXT_CHAR_LIMIT,
+                )
                 messages = self.compact_history(messages, active_request)
         return messages
 

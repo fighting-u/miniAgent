@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import Any
 
@@ -7,9 +8,13 @@ from openai import OpenAI
 
 from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
+from logging_config import setup_logging
 from system_prompt import SYSTEM
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
+
+# 当前模块使用的日志记录器。
+logger = logging.getLogger(__name__)
 
 # 系统提示词
 INSTRUCTIONS = SYSTEM
@@ -38,7 +43,7 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
             reactive_retries = 0
         except Exception as error:
             if is_context_length_error(error) and reactive_retries < MAX_REACTIVE_COMPACT_RETRIES:
-                print("[响应式压缩上下文]")
+                logger.warning("模型请求因上下文过长被拒绝，开始响应式压缩并重试")
                 messages[:] = compactor.reactive_compact(messages, active_request)
                 reactive_retries += 1
                 continue
@@ -78,6 +83,7 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
                 if tool_call.name == "compact":
                     output = "已收到主动压缩请求，将在本轮工具调用全部结束后压缩上下文。"
                     compact_requested = True
+                    logger.info("模型主动请求压缩上下文")
                 else:
                     handler = TOOL_HANDLERS.get(tool_call.name)
                     output = str(handler(**arguments)) if handler else f"未知工具: {tool_call.name}"
@@ -109,6 +115,8 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
 def main() -> None:
     """加载配置，读取用户运行时输入并启动一次 Agent 任务。"""
     load_dotenv()
+    log_path = setup_logging()
+    logger.info("MiniAgent 启动，本次日志文件：%s", log_path)
     base_url = os.getenv("BASE_URL")
     # api_key = os.getenv("OPENAI_API_KEY")
     # qwen
