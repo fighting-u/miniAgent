@@ -11,8 +11,8 @@ from openai import OpenAI
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
 
-# 默认上下文字符阈值；字符数只是 token 数的低成本近似值。
-CONTEXT_CHAR_LIMIT = 50_000
+# qwen3.7-flash 支持 100 万 Token 上下文；按约 70 万中文字符的 80% 预留安全空间。
+CONTEXT_CHAR_LIMIT = 560_000
 
 # 单轮工具结果的总字符预算。
 TOOL_RESULT_BATCH_CHAR_LIMIT = 200_000
@@ -280,12 +280,37 @@ class ContextCompactor:
                     changed = True
         return head_end, tail_start
 
+    @classmethod
+    def logical_message_spans(cls, messages: list[Any]) -> list[tuple[int, int]]:
+        """把同轮模型输出或同批工具结果合并为 OpenAI 适配后的逻辑消息区间。"""
+        spans: list[tuple[int, int]] = []
+        index = 0
+        while index < len(messages):
+            start = index
+            if cls.is_model_output(messages[index]):
+                index += 1
+                while index < len(messages) and cls.is_model_output(messages[index]):
+                    index += 1
+            elif cls.item_type(messages[index]) == "function_call_output":
+                index += 1
+                while (
+                    index < len(messages)
+                    and cls.item_type(messages[index]) == "function_call_output"
+                ):
+                    index += 1
+            else:
+                index += 1
+            spans.append((start, index))
+        return spans
+
     def is_archive_marker(self, item: Any) -> bool:
         """判断消息项是否为本压缩器生成且仍有效的历史归档标记。"""
         if not isinstance(item, dict) or item.get("role") != "user":
             return False
         content = item.get("content")
-        match = re.fullmatch(r"\[已裁剪 \d+ 条消息，完整历史：(.+)\]", content or "")
+        match = re.fullmatch(
+            r"\[已裁剪 \d+ 条(?:逻辑)?消息，完整历史：(.+)\]", content or ""
+        )
         if not match:
             return False
         path = Path(match.group(1))
@@ -295,18 +320,23 @@ class ContextCompactor:
             return False
 
     def snip_compact(self, messages: list[Any], max_messages: int = 50) -> list[Any]:
-        """第二步：消息超过 50 条时归档全文，只保留头部、标记和安全尾部。"""
-        if len(messages) <= max_messages:
+        """第二步：逻辑消息超过 50 条时归档全文，只保留头部、标记和安全尾部。"""
+        spans = self.logical_message_spans(messages)
+        if len(spans) <= max_messages:
             return messages
 
-        before_count = len(messages)
+        before_count = len(spans)
+        before_item_count = len(messages)
         logger.info(
-            "[上下文压缩 2/5] 消息项共 %d 条，超过 %d 条限制",
+            "[上下文压缩 2/5] 逻辑消息共 %d 条，超过 %d 条限制（原始消息项 %d 个）",
             before_count,
             max_messages,
+            before_item_count,
         )
-        head_end = 3
-        tail_start = len(messages) - (max_messages - head_end - 1)
+        head_message_count = 3
+        tail_message_count = max_messages - head_message_count - 1
+        head_end = spans[head_message_count - 1][1]
+        tail_start = spans[-tail_message_count][0]
         head_end, tail_start = self.safe_snip_boundaries(messages, head_end, tail_start)
         if head_end >= tail_start:
             logger.warning("[上下文压缩 2/5] 为保持模型输出和工具调用配对，本次未执行裁剪")
@@ -318,16 +348,20 @@ class ContextCompactor:
             return messages
 
         transcript_path = self.write_transcript(messages)
+        removed_message_count = sum(
+            1 for start, end in spans if start >= head_end and end <= tail_start
+        )
         marker = {
             "role": "user",
-            "content": f"[已裁剪 {len(middle)} 条消息，完整历史：{transcript_path}]",
+            "content": f"[已裁剪 {removed_message_count} 条逻辑消息，完整历史：{transcript_path}]",
         }
         compacted_messages = [*messages[:head_end], marker, *messages[tail_start:]]
         logger.info(
-            "[上下文压缩 2/5] 已裁剪 %d 条消息项，消息数由 %d 条降至 %d 条，完整历史：%s",
+            "[上下文压缩 2/5] 已裁剪 %d 条逻辑消息（%d 个原始消息项），逻辑消息数由 %d 条降至 %d 条，完整历史：%s",
+            removed_message_count,
             len(middle),
             before_count,
-            len(compacted_messages),
+            len(self.logical_message_spans(compacted_messages)),
             transcript_path,
         )
         return compacted_messages
