@@ -104,6 +104,13 @@ TOOLS = [
         },
         "strict": True,
     },
+    {
+        "type": "function",
+        "name": "compact",
+        "description": "当较早对话已占用较多上下文并且细节不再重要时，可主动归档并摘要历史以释放空间。",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
 ]
 
 

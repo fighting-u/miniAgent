@@ -6,6 +6,7 @@
 ```text
 miniAgent/
 ├── core.py                     # Agent 主入口，负责对话循环、模型请求和工具调度
+├── context_compactor.py        # 上下文压缩管线，负责工具结果落盘、历史裁剪和摘要
 ├── tools.py                    # 工具定义、工具处理函数和任务计划管理
 ├── hook.py                     # Hook 注册与触发，包含权限检查和运行日志扩展
 ├── system_prompt.py            # 构建并导出发送给模型的系统提示词
