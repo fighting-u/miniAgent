@@ -183,7 +183,7 @@ def summary_hook(messages: list[Any]) -> None:
 # 注册当前已有的 Hook 扩展逻辑，注册顺序就是同一事件的执行顺序。
 register_hook("PreUserPromptSubmit", workdir_log_hook)
 register_hook("PreToolUse", tool_request_log_hook)
-register_hook("PreToolUse", permission_hook)
+# register_hook("PreToolUse", permission_hook)
 register_hook("PostToolUse", tool_output_log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)

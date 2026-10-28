@@ -9,6 +9,7 @@ from openai import OpenAI
 from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
 from logging_config import setup_logging
+from memory import extract_memories
 from system_prompt import SYSTEM
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
@@ -60,6 +61,8 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
             if forced_input is not None:
                 messages.append({"role": "user", "content": forced_input})
                 continue
+            # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
+            extract_memories(client, messages)
             return
 
         # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
