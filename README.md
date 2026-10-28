@@ -10,7 +10,7 @@ miniAgent/
 ├── logging_config.py           # 统一配置控制台和文件双写日志
 ├── tools.py                    # 工具定义、工具处理函数和任务计划管理
 ├── hook.py                     # Hook 注册与触发，包含权限检查和运行日志扩展
-├── memory.py                   # 从完整对话中提取长期信息并写入记忆文件
+├── memory.py                   # 负责长期记忆的提取、文件存储和按需召回
 ├── system_prompt.py            # 构建并导出发送给模型的系统提示词
 ├── skill.py                    # 发现、列出并按需加载本地技能
 ├── skills/                     # 本地技能目录

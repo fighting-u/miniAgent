@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from memory import load_memory
 from skill import SKILL_LOADER
 
 
@@ -100,6 +101,18 @@ TOOLS = [
             "type": "object",
             "properties": {"name": {"type": "string", "description": "系统提示词中列出的技能名称。"}},
             "required": ["name"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "load_memory",
+        "description": "根据系统提示词中的记忆文件名，按需读取一条长期记忆的完整内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {"filename": {"type": "string", "description": "长期记忆目录中列出的 Markdown 文件名。"}},
+            "required": ["filename"],
             "additionalProperties": False,
         },
         "strict": True,
@@ -295,4 +308,5 @@ TOOL_HANDLERS = {
     "glob": run_glob,
     "update_plan": run_update_plan,
     "load_skill": SKILL_LOADER.load,
+    "load_memory": load_memory,
 }

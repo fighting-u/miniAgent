@@ -28,6 +28,21 @@ MAX_DIALOGUE_CHARS = 8000
 # 发送给辅助模型的已有记忆目录最大字符数。
 MAX_CATALOG_CHARS = 6000
 
+# 记忆召回时发送给辅助模型的目录最大字符数。
+RECALL_CATALOG_CHAR_LIMIT = 12000
+
+# 单次自动召回的记忆全文合计最大字符数。
+RECALL_CHAR_LIMIT = 12000
+
+# 单次自动召回最多选择的记忆数量。
+MAX_RECALL_ITEMS = 5
+
+# 用于选择相关记忆的最近用户消息数量。
+RECENT_USER_TURNS = 3
+
+# 发送给记忆选择模型的最近用户文本最大字符数。
+RECENT_USER_CHAR_LIMIT = 4000
+
 
 def message_text(message: Any) -> str:
     """从字典消息或 OpenAI 响应对象中提取可读文本。"""
@@ -102,6 +117,7 @@ def read_memory_preview(memory_file: Path) -> dict[str, str] | None:
     if not name or not description:
         return None
     return {
+        "filename": memory_file.name,
         "name": name,
         "type": str(metadata.get("type", "")).strip(),
         "description": description,
@@ -121,6 +137,36 @@ def list_memory_previews() -> list[dict[str, str]]:
     return previews
 
 
+def memory_catalog() -> str:
+    """返回适合放入系统提示词的记忆文件名和摘要目录。"""
+    previews = list_memory_previews()
+    if not previews:
+        return "（暂无长期记忆）"
+    return "\n".join(
+        f"- {record['filename']}: {record['name']}（{record['type']}）- {record['description']}"
+        for record in previews
+    )
+
+
+def read_memory_file(filename: str) -> str:
+    """仅按文件名读取长期记忆目录中的 Markdown 全文。"""
+    if Path(filename).name != filename or not filename.lower().endswith(".md"):
+        return ""
+    memory_file = MEMORY_DIR / filename
+    if not memory_file.is_file():
+        return ""
+    try:
+        return memory_file.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def load_memory(filename: str) -> str:
+    """为主模型按文件名读取完整记忆，不存在时返回明确错误。"""
+    content = read_memory_file(filename)
+    return content or f"错误：未找到记忆文件 '{filename}'。"
+
+
 def extract_json_array(text: str) -> list[Any]:
     """从辅助模型文本中截取并解析第一个 JSON 数组。"""
     start = text.find("[")
@@ -132,6 +178,83 @@ def extract_json_array(text: str) -> list[Any]:
     except json.JSONDecodeError:
         return []
     return value if isinstance(value, list) else []
+
+
+def recent_user_text(messages: list[Any], max_turns: int = RECENT_USER_TURNS) -> str:
+    """逆序收集最近的用户文本，作为相关记忆选择查询。"""
+    turns = []
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        # TODO: 后续区分真实用户请求和规划提醒等 Harness 内部 user 消息。
+        text = message_text(message).strip()
+        if text:
+            turns.append(text)
+        if len(turns) == max_turns:
+            break
+    return "\n".join(reversed(turns))[:RECENT_USER_CHAR_LIMIT]
+
+
+def keyword_memory_selection(
+    records: list[dict[str, str]], query: str, max_items: int = MAX_RECALL_ITEMS
+) -> list[str]:
+    """保留关键词召回兜底接口；暂不对中文文本进行朴素分词匹配。"""
+    return []
+
+
+def select_relevant_memories(
+    client: OpenAI, messages: list[Any], max_items: int = MAX_RECALL_ITEMS
+) -> list[str]:
+    """调用辅助模型，从摘要目录中选择与当前请求相关的记忆文件。"""
+    records = list_memory_previews()
+    query = recent_user_text(messages)
+    if not records or not query:
+        return []
+
+    catalog = "\n".join(
+        f"{index}: {record['name']} - {record['description']}"
+        for index, record in enumerate(records)
+    )
+    prompt = (
+        "从下面的长期记忆目录中，选择与当前用户请求相关的记忆。\n"
+        "只返回目录索引组成的 JSON 数组，例如 [0, 2]。没有相关记忆时返回 []。\n\n"
+        f"当前请求：\n{query}\n\n"
+        f"记忆目录：\n{catalog[:RECALL_CATALOG_CHAR_LIMIT]}"
+    )
+
+    try:
+        response = client.responses.create(
+            model=os.getenv("MODEL"),
+            instructions="你是长期记忆召回助手，只能返回符合要求的 JSON 数组。",
+            input=prompt,
+            max_output_tokens=200,
+        )
+        selected = []
+        for index in extract_json_array(response.output_text):
+            if isinstance(index, int) and 0 <= index < len(records):
+                filename = records[index]["filename"]
+                if filename not in selected:
+                    selected.append(filename)
+                if len(selected) == max_items:
+                    break
+        return selected
+    except Exception as error:
+        logger.warning("长期记忆自动召回失败：%s", error)
+        return keyword_memory_selection(records, query, max_items)
+
+
+def load_memories(client: OpenAI, messages: list[Any]) -> str:
+    """读取辅助模型选中的记忆全文，并限制单次自动召回总字符数。"""
+    loaded = []
+    remaining = RECALL_CHAR_LIMIT
+    for filename in select_relevant_memories(client, messages):
+        content = read_memory_file(filename)
+        if not content or remaining <= 0:
+            continue
+        recalled = content[:remaining]
+        loaded.append({"source": filename, "content": recalled})
+        remaining -= len(recalled)
+    return json.dumps(loaded, ensure_ascii=False, indent=2) if loaded else ""
 
 
 def write_memory_file(name: str, memory_type: str, description: str, body: str) -> Path:

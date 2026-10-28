@@ -9,16 +9,13 @@ from openai import OpenAI
 from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
 from logging_config import setup_logging
-from memory import extract_memories
-from system_prompt import SYSTEM
+from memory import extract_memories, load_memories
+from system_prompt import build_system_prompt
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
-
-# 系统提示词
-INSTRUCTIONS = SYSTEM
 
 # 连续多少轮未更新计划后，向模型追加一次规划提醒。
 PLAN_REMINDER_INTERVAL = 3
@@ -29,6 +26,9 @@ MAX_REACTIVE_COMPACT_RETRIES = 1
 
 def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
+    # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
+    relevant_memories = load_memories(client, messages)
+    instructions = build_system_prompt(relevant_memories)
     # 记录连续多少轮工具调用没有使用计划工具。
     rounds_since_plan = 0
     # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
@@ -40,7 +40,7 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
         messages[:] = compactor.prepare(messages, active_request)
         # 发送当前对话，请求模型继续推理或调用工具。
         try:
-            response = client.responses.create(model=os.getenv("MODEL"), instructions=INSTRUCTIONS, input=messages, tools=TOOLS)
+            response = client.responses.create(model=os.getenv("MODEL"), instructions=instructions, input=messages, tools=TOOLS)
             reactive_retries = 0
         except Exception as error:
             if is_context_length_error(error) and reactive_retries < MAX_REACTIVE_COMPACT_RETRIES:
