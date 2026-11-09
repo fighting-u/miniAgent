@@ -90,8 +90,10 @@ class ContextCompactor:
     @classmethod
     def is_model_output(cls, item: Any) -> bool:
         """判断消息项是否来自最近一次模型响应。"""
-        if cls.item_value(item, "role") == "assistant":
-            return True
+        # 持久化恢复后的用户消息也有 type=message，需优先按角色区分。
+        role = cls.item_value(item, "role")
+        if role is not None:
+            return role == "assistant"
         return cls.item_type(item) in {
             "message",
             "reasoning",

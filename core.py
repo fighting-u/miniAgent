@@ -1,3 +1,4 @@
+import argparse
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
 from logging_config import setup_logging
 from memory import extract_memories, load_memories
+from session_store import SessionStore
 from system_prompt import build_system_prompt
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
@@ -24,7 +26,9 @@ PLAN_REMINDER_INTERVAL = 3
 MAX_REACTIVE_COMPACT_RETRIES = 1
 
 
-def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None:
+def agent_loop(
+    client: OpenAI, messages: list[Any], active_request: str, session: SessionStore | None = None
+) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
     relevant_memories = load_memories(client, messages)
@@ -35,12 +39,15 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
     compactor = ContextCompactor(client, os.getenv("MODEL", ""))
     # 记录当前模型请求已进行的响应式压缩重试次数。
     reactive_retries = 0
+    # 固定本轮使用的模型名称，也用于持久化元信息。
+    model_name = os.getenv("MODEL", "")
     while True:
         # 每次请求模型前依次执行确定性裁剪，必要时再生成历史摘要。
         messages[:] = compactor.prepare(messages, active_request)
         # 发送当前对话，请求模型继续推理或调用工具。
         try:
-            response = client.responses.create(model=os.getenv("MODEL"), instructions=instructions, input=messages, tools=TOOLS)
+            response = client.responses.create(model=model_name, instructions=instructions, input=messages, tools=TOOLS)
+            # print(response.output)
             reactive_retries = 0
         except Exception as error:
             if is_context_length_error(error) and reactive_retries < MAX_REACTIVE_COMPACT_RETRIES:
@@ -49,6 +56,9 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
                 reactive_retries += 1
                 continue
             raise
+        if session is not None:
+            for item in response.output:
+                session.append(item, model_name=model_name)
         messages.extend(response.output)
 
         # 从模型本轮输出中筛选所有函数工具调用。
@@ -59,7 +69,10 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
             forced_input = trigger_hooks("Stop", messages)
             # todo: 后续优化点，不简单以不调用工具为结束标志
             if forced_input is not None:
-                messages.append({"role": "user", "content": forced_input})
+                forced_message = {"role": "user", "content": forced_input}
+                if session is not None:
+                    session.append(forced_message)
+                messages.append(forced_message)
                 continue
             # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
             extract_memories(client, messages)
@@ -78,9 +91,10 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
                 blocked = trigger_hooks("PreToolUse", tool_call, arguments)
                 if blocked is not None:
                     # todo: 这里给llm的反馈太笼统了，后续可优化细分
-                    results.append(
-                        {"type": "function_call_output", "call_id": tool_call.call_id, "output": str(blocked)}
-                    )
+                    result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": str(blocked)}
+                    if session is not None:
+                        session.append(result)
+                    results.append(result)
                     continue
 
                 if tool_call.name == "compact":
@@ -97,17 +111,21 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
             except (json.JSONDecodeError, TypeError) as error:
                 output = f"工具参数无效：{error}"
 
-            results.append({"type": "function_call_output", "call_id": tool_call.call_id, "output": output})
+            result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
+            if session is not None:
+                session.append(result)
+            results.append(result)
 
         # 连续多轮未更新计划时，把当前计划和更新提醒一并追加给模型。
         rounds_since_plan = 0 if used_plan else rounds_since_plan + 1
         if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
-            results.append(
-                {
-                    "role": "user",
-                    "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
-                }
-            )
+            reminder = {
+                "role": "user",
+                "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
+            }
+            if session is not None:
+                session.append(reminder)
+            results.append(reminder)
             rounds_since_plan = 0
         messages.extend(results)
         # 等同普通工具一样先保留调用和结果配对，再整体归档并生成摘要。
@@ -117,6 +135,10 @@ def agent_loop(client: OpenAI, messages: list[Any], active_request: str) -> None
 
 def main() -> None:
     """加载配置，读取用户运行时输入并启动一次 Agent 任务。"""
+    # 可显式传入历史文件继续会话；默认创建新会话。
+    parser = argparse.ArgumentParser(description="MiniAgent 中文命令行助手")
+    parser.add_argument("--resume", metavar="JSONL路径", help="加载已有会话并继续追加记录")
+    args = parser.parse_args()
     load_dotenv()
     log_path = setup_logging()
     logger.info("MiniAgent 启动，本次日志文件：%s", log_path)
@@ -129,19 +151,37 @@ def main() -> None:
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
+    if args.resume:
+        session, history = SessionStore.load(args.resume)
+        interrupted_results = session.recover_pending_tools()
+        history.extend(interrupted_results)
+        if interrupted_results:
+            print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
+        print(f"已加载历史会话：{session.path}")
+    else:
+        session = SessionStore.create()
+        history = []
+    print(f"会话文件：{session.path}")
     print("请输入问题或者任务，enter提交，输入q结束对话。")
-    history = []
 
     while True:
         # 在读取本轮用户输入前触发 Hook，便于扩展输入提示前的行为。
         trigger_hooks("PreUserPromptSubmit")
-        user_request = input("请输入：").strip()
+        try:
+            user_request = input("请输入：").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n对话已断开，可使用 --resume 加载会话文件继续。")
+            break
         if user_request.lower() == "q":
             print("结束对话。")
             break
 
-        history.append({"role": "user", "content": user_request})
-        agent_loop(client, history, user_request)
+        history.append(session.start_turn(user_request))
+        try:
+            agent_loop(client, history, user_request, session=session)
+        except KeyboardInterrupt:
+            print("\n本轮已中断，可使用 --resume 加载会话文件继续。")
+            break
 
         # 打印模型最后一次返回的文本内容。
         response_content = history[-1].content

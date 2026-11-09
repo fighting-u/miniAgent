@@ -9,4 +9,6 @@ dependencies = [
     "openai>=1.66.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    # 为会话标识生成带时间顺序的 UUIDv7。
+    "uuid6>=2025.0.1",
 ]
