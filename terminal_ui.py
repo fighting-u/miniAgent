@@ -15,7 +15,7 @@ from prompt_toolkit.styles import Style
 
 
 # 输入框支持的斜杠命令及中文补全说明。
-COMMANDS = {"/new": "开启新对话", "/resume": "选择历史会话", "/q": "退出程序"}
+COMMANDS = {"/new": "开启新对话", "/resume": "选择历史会话", "/delete": "选择并删除会话", "/q": "退出程序"}
 
 # 终端输入、菜单和角色标题的轻量配色。
 UI_STYLE = Style.from_dict({
@@ -28,6 +28,7 @@ UI_STYLE = Style.from_dict({
     "completion-menu.meta.completion.current": "bg:#5f87ff #ffffff",
     "user": "#5f87ff bold",
     "assistant": "#5faf87 bold",
+    "system": "#af87ff bold",
     "detail": "#888888",
 })
 
@@ -115,21 +116,21 @@ class TerminalUI:
             message=[("class:prompt", "› ")],
             placeholder=[("class:placeholder", "输入问题，或输入 / 查看命令")],
             completer=CommandCompleter(), complete_while_typing=True,
-            key_bindings=menu_bindings(ignore_blank=True), style=UI_STYLE, reserve_space_for_menu=3,
-            bottom_toolbar=f"{model_name} · {Path.cwd()}\n/new 新对话   /resume 历史会话   /q 退出",
+            key_bindings=menu_bindings(ignore_blank=True), style=UI_STYLE, reserve_space_for_menu=len(COMMANDS),
+            bottom_toolbar=f"{model_name} · {Path.cwd()}\n/new 新对话   /resume 历史会话   /delete 删除会话   /q 退出",
         )
 
     def read_input(self) -> str:
         """读取一次有效用户输入，空白回车保留在同一个输入框。"""
         return self.prompt.prompt().strip()
 
-    def choose_session(self, sessions: list[dict[str, Any]]) -> Path | None:
-        """弹出可滚动的会话补全列表，空提交或 Ctrl+C 取消切换。"""
+    def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> Path | None:
+        """复用同一个会话选择列表，供恢复或删除使用，取消时不改变当前会话。"""
         if not sessions:
-            print("暂无可恢复的会话。")
+            print("暂无可选择的会话。")
             return None
         selector = PromptSession(
-            message="恢复 › ", completer=SessionCompleter(sessions), complete_while_typing=True,
+            message=f"{action} › ", completer=SessionCompleter(sessions), complete_while_typing=True,
             key_bindings=menu_bindings(), style=UI_STYLE, reserve_space_for_menu=10,
             placeholder="选择会话或输入序号；Ctrl+C 取消",
             bottom_toolbar="最近时间 · 首条用户问题    ↑↓ 选择  Tab 补全  Enter 确认",
@@ -149,6 +150,20 @@ class TerminalUI:
             if choice.isdecimal() and 1 <= int(choice) <= len(sessions):
                 return sessions[int(choice) - 1]["path"]
             print("请输入列表内的有效序号，或按 Ctrl+C 取消。")
+
+    def confirm_delete(self, session_info: dict[str, Any], is_current: bool) -> bool:
+        """显示选中会话的时间和问题，只有明确输入 y 或 yes 才允许删除。"""
+        timestamp = datetime.fromtimestamp(session_info["updated_at"]).strftime("%Y-%m-%d %H:%M")
+        print(f"准备删除：{timestamp}  {session_info['preview']}")
+        print("删除后无法通过程序恢复。")
+        if is_current:
+            print("这是当前会话，删除后将清屏并开启新会话。")
+        confirmation = PromptSession(style=UI_STYLE)
+        try:
+            answer = confirmation.prompt("确认删除？[y/N] ").strip().casefold()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in {"y", "yes"}
 
     def show_session(self, history: list[Any], title: str) -> None:
         """清理当前屏幕并展示选中会话的历史，不修改或重放记录。"""
@@ -172,7 +187,7 @@ class TerminalUI:
             if kind == "message":
                 role = item_value(item, "role", "assistant")
                 label = {"user": "你", "assistant": "助手", "system": "系统", "developer": "开发者"}.get(role, role)
-                style = role if role in {"user", "assistant"} else "detail"
+                style = role if role in {"user", "assistant", "system"} else "detail"
                 text = content_text(item_value(item, "content"))
             elif kind == "reasoning":
                 label = "推理摘要"

@@ -75,6 +75,15 @@ class SessionStore:
         return sorted(sessions, key=lambda item: (item["updated_at"], item["path"].name), reverse=True)
 
     @classmethod
+    def delete(cls, path: str | Path, root: Path = SESSION_DIR) -> None:
+        """删除已确认的单个会话文件，限制在会话日期目录内，不递归删除目录。"""
+        target = Path(path).resolve()
+        relative = target.relative_to(root.resolve())
+        if len(relative.parts) != 4 or target.suffix != ".jsonl" or not target.is_file():
+            raise ValueError("只能删除会话日期目录内的 JSONL 文件")
+        target.unlink()
+
+    @classmethod
     def load(cls, path: str | Path) -> tuple["SessionStore", list[dict[str, Any]]]:
         """校验文件并恢复原始上下文，移除附加 metadata，不改写历史。"""
         store = cls(Path(path).resolve())

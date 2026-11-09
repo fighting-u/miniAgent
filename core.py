@@ -71,7 +71,8 @@ def agent_loop(
             forced_input = trigger_hooks("Stop", messages)
             # todo: 后续优化点，不简单以不调用工具为结束标志
             if forced_input is not None:
-                forced_message = {"role": "user", "content": forced_input}
+                # Harness 的续跑要求属于系统提示，不冒充真实用户输入。
+                forced_message = {"role": "system", "content": forced_input}
                 session.append(forced_message)
                 messages.append(forced_message)
                 TerminalUI.show_items([forced_message])
@@ -123,7 +124,7 @@ def agent_loop(
         rounds_since_plan = 0 if used_plan else rounds_since_plan + 1
         if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
             reminder = {
-                "role": "user",
+                "role": "system",
                 "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
             }
             session.append(reminder)
@@ -136,7 +137,7 @@ def agent_loop(
             messages[:] = compactor.compact_history(messages, active_request)
 
 # todo: ?
-def show_active_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
+def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
     """处理缺失工具结果并展示会话，切换时清空不属于该会话的运行时计划。"""
     interrupted_results = session.recover_pending_tools()
     history.extend(interrupted_results)
@@ -175,7 +176,7 @@ def main() -> None:
     else:
         session = SessionStore.create()
         history = []
-    show_active_session(session, history, ui, title)
+    activate_session(session, history, ui, title)
     if startup_error:
         print(f"上次会话无法加载：{startup_error}\n已开启新会话，原文件未修改；可输入 /resume 选择其他会话。")
 
@@ -194,7 +195,7 @@ def main() -> None:
             break
         if user_request == "/new":
             session, history = SessionStore.create(), []
-            show_active_session(session, history, ui, "新会话")
+            activate_session(session, history, ui, "新会话")
             continue
         if user_request == "/resume":
             selected = ui.choose_session(SessionStore.list_sessions())
@@ -204,8 +205,30 @@ def main() -> None:
                 except (OSError, ValueError) as error:
                     print(f"无法恢复该会话：{error}")
                     continue
-                show_active_session(restored, restored_history, ui, "已恢复会话")
+                activate_session(restored, restored_history, ui, "已恢复会话")
                 session, history = restored, restored_history
+            continue
+        if user_request == "/delete":
+            available_sessions = SessionStore.list_sessions()
+            selected = ui.choose_session(available_sessions, action="删除")
+            if selected is None:
+                continue
+            selected_info = next(item for item in available_sessions if item["path"] == selected)
+            is_current = selected == session.path
+            if not ui.confirm_delete(selected_info, is_current):
+                print("已取消删除。")
+                continue
+            try:
+                SessionStore.delete(selected)
+            except (OSError, ValueError) as error:
+                print(f"删除失败：{error}")
+                continue
+            logger.info("已删除会话文件：%s", selected)
+            if is_current:
+                session, history = SessionStore.create(), []
+                activate_session(session, history, ui, "当前会话已删除，已开启新会话")
+            else:
+                print("已删除所选会话文件，此操作无法通过程序恢复。")
             continue
         if user_request.startswith("/"):
             print("未知命令，可用命令：" + "、".join(COMMANDS))
