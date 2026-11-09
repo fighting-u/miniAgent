@@ -163,8 +163,9 @@ class TerminalUI:
         else:
             print("还没有聊天记录，输入问题开始对话。\n")
 
-    def show_items(self, items: list[Any]) -> None:
-        """按角色展示消息正文，并为推理、工具调用及结果提供有限预览。"""
+    @staticmethod
+    def show_items(items: list[Any]) -> None:
+        """统一渲染历史和实时事件，不依赖输入框实例，细节内容提供有限预览。"""
         for item in items:
             kind = item_value(item, "type", "message")
             style = "detail"

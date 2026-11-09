@@ -47,7 +47,7 @@ class SessionTests(unittest.TestCase):
     """验证实际 SDK 序列化、会话落盘以及核心循环的中断恢复。"""
 
     def setUp(self) -> None:
-        """创建隔离工作区，禁用辅助记忆调用，并禁止触发任何压缩落盘。"""
+        """创建自动清理的隔离工作区，禁用辅助记忆调用，并禁止触发任何压缩落盘。"""
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))

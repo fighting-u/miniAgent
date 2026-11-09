@@ -60,6 +60,8 @@ def agent_loop(
         for item in response.output:
             session.append(item, model_name=model_name)
         messages.extend(response.output)
+        # 按响应原始顺序展示推理、工具调用和回答，工具执行前即可看到调用内容。
+        TerminalUI.show_items(response.output)
 
         # 从模型本轮输出中筛选所有函数工具调用。
         tool_calls = [item for item in response.output if item.type == "function_call"]
@@ -72,7 +74,9 @@ def agent_loop(
                 forced_message = {"role": "user", "content": forced_input}
                 session.append(forced_message)
                 messages.append(forced_message)
+                TerminalUI.show_items([forced_message])
                 continue
+            # todo: 应该异步，不然等半天
             # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
             extract_memories(client, messages)
             return
@@ -93,6 +97,7 @@ def agent_loop(
                     result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": str(blocked)}
                     session.append(result)
                     results.append(result)
+                    TerminalUI.show_items([result])
                     continue
 
                 if tool_call.name == "compact":
@@ -112,6 +117,7 @@ def agent_loop(
             result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
             session.append(result)
             results.append(result)
+            TerminalUI.show_items([result])
 
         # 连续多轮未更新计划时，把当前计划和更新提醒一并追加给模型。
         rounds_since_plan = 0 if used_plan else rounds_since_plan + 1
@@ -122,6 +128,7 @@ def agent_loop(
             }
             session.append(reminder)
             results.append(reminder)
+            TerminalUI.show_items([reminder])
             rounds_since_plan = 0
         messages.extend(results)
         # 等同普通工具一样先保留调用和结果配对，再整体归档并生成摘要。
@@ -211,8 +218,7 @@ def main() -> None:
             print("\n本轮已中断，下次启动将自动恢复最近会话。")
             break
 
-        # 打印模型最后一次返回的文本内容。
-        ui.show_items([history[-1]])
+        # 模型文本和工具交互已在循环中逐步展示，不重复打印最后的回答。
 
 
 if __name__ == "__main__":

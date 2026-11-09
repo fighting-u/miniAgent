@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import core
+import tools
 from context_compactor import ContextCompactor
 from memory import message_text
 from session_store import SessionStore
@@ -36,7 +37,8 @@ def worker(phase: str, state_path: Path) -> None:
     if not model or not api_key:
         raise RuntimeError("真实测试需要配置 MODEL 和 DASHSCOPE_API_KEY。")
     if phase == "first":
-        session = SessionStore.create()
+        # 会话和工具读取的文件均位于父进程管理的临时目录，不写入正式 sessions。
+        session = SessionStore.create(state_path.parent / "sessions")
         history = []
         token = f"青松-{session.path.stem[-8:]}"
         fixture = session.path.with_suffix(".fixture.txt")
@@ -53,6 +55,7 @@ def worker(phase: str, state_path: Path) -> None:
     history.append(session.start_turn(question))
     with ExitStack() as stack:
         # 仅保留简短会话和只读文件工具，避免无关记忆写入或压缩增加测试复杂度。
+        stack.enter_context(patch.object(tools, "WORKDIR", state_path.parent.resolve()))
         stack.enter_context(patch.object(core, "load_memories", return_value=""))
         stack.enter_context(patch.object(core, "extract_memories", return_value=0))
         stack.enter_context(patch.object(core, "build_system_prompt", return_value=
@@ -110,6 +113,7 @@ def main() -> None:
             parser.error("子进程需要 --state")
         worker(args.phase, args.state)
         return
+    # 父进程管理整个临时目录，子进程硬退出或测试失败时也会自动清理本次数据。
     with tempfile.TemporaryDirectory(prefix="miniagent-session-live-") as directory:
         state_path = Path(directory) / "state.json"
         env = dict(os.environ, PYTHONUTF8="1")
@@ -130,7 +134,7 @@ def main() -> None:
         restored, _ = SessionStore.load(session_path)
         if restored.pending_calls:
             raise AssertionError("仍有未配对工具调用")
-        print(f"真实跨进程续聊测试通过。会话文件：{session_path}")
+    print("真实跨进程续聊测试通过；本次临时会话、工具读取文件和状态文件已自动清理。")
 
 
 if __name__ == "__main__":
