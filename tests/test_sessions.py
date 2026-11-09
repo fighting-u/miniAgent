@@ -230,7 +230,7 @@ class SessionTests(unittest.TestCase):
                 SessionStore.load(self.session.path)
 
     def test_cli_new_session_and_resume(self) -> None:
-        """通过 main 的命令行入口创建会话、退出、加载原文件并继续提问。"""
+        """通过 main 创建会话，重新启动时自动加载原文件并继续提问。"""
         requests = []
         client = self.client([[assistant_message("你好。")], [assistant_message("欢迎回来。")]], requests)
         with ExitStack() as stack:
@@ -238,14 +238,16 @@ class SessionTests(unittest.TestCase):
             stack.enter_context(patch.object(core, "load_dotenv"))
             stack.enter_context(patch.object(core, "setup_logging", return_value="测试日志"))
             stack.enter_context(patch.object(SessionStore, "create", return_value=self.session))
+            session_list = stack.enter_context(patch.object(SessionStore, "list_sessions", return_value=[]))
+            ui = stack.enter_context(patch.object(core, "TerminalUI")).return_value
             stack.enter_context(patch.dict(os.environ, {"DASHSCOPE_API_KEY": "local-test-key"}))
             stack.enter_context(redirect_stdout(io.StringIO()))
-            with patch("sys.argv", ["core.py"]), patch("builtins.input", side_effect=["你好", "q"]):
-                core.main()
+            ui.read_input.side_effect = ["你好", "/q"]
+            core.main()
             prefix = self.session.path.read_bytes()
-            with patch("sys.argv", ["core.py", "--resume", str(self.session.path)]), \
-                    patch("builtins.input", side_effect=["继续聊天", "q"]):
-                core.main()
+            session_list.return_value = [{"path": self.session.path}]
+            ui.read_input.side_effect = ["继续聊天", "/q"]
+            core.main()
         self.assertEqual(len(requests[-1]["input"]), 3)
         self.assertEqual(requests[-1]["input"][0]["content"], "你好")
         self.assertTrue(self.session.path.read_bytes().startswith(prefix))

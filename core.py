@@ -1,4 +1,3 @@
-import argparse
 import json
 import logging
 import os
@@ -13,10 +12,12 @@ from logging_config import setup_logging
 from memory import extract_memories, load_memories
 from session_store import SessionStore
 from system_prompt import build_system_prompt
+from terminal_ui import COMMANDS, TerminalUI
 from tools import PLAN, TOOL_HANDLERS, TOOLS
 
 
 # 当前模块使用的日志记录器。
+# todo: 日志要调整下，终端不用输出没什么用的内容
 logger = logging.getLogger(__name__)
 
 # 连续多少轮未更新计划后，向模型追加一次规划提醒。
@@ -27,7 +28,7 @@ MAX_REACTIVE_COMPACT_RETRIES = 1
 
 
 def agent_loop(
-    client: OpenAI, messages: list[Any], active_request: str, session: SessionStore | None = None
+    client: OpenAI, messages: list[Any], active_request: str, session: SessionStore
 ) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
@@ -56,9 +57,8 @@ def agent_loop(
                 reactive_retries += 1
                 continue
             raise
-        if session is not None:
-            for item in response.output:
-                session.append(item, model_name=model_name)
+        for item in response.output:
+            session.append(item, model_name=model_name)
         messages.extend(response.output)
 
         # 从模型本轮输出中筛选所有函数工具调用。
@@ -70,8 +70,7 @@ def agent_loop(
             # todo: 后续优化点，不简单以不调用工具为结束标志
             if forced_input is not None:
                 forced_message = {"role": "user", "content": forced_input}
-                if session is not None:
-                    session.append(forced_message)
+                session.append(forced_message)
                 messages.append(forced_message)
                 continue
             # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
@@ -92,8 +91,7 @@ def agent_loop(
                 if blocked is not None:
                     # todo: 这里给llm的反馈太笼统了，后续可优化细分
                     result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": str(blocked)}
-                    if session is not None:
-                        session.append(result)
+                    session.append(result)
                     results.append(result)
                     continue
 
@@ -112,8 +110,7 @@ def agent_loop(
                 output = f"工具参数无效：{error}"
 
             result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
-            if session is not None:
-                session.append(result)
+            session.append(result)
             results.append(result)
 
         # 连续多轮未更新计划时，把当前计划和更新提醒一并追加给模型。
@@ -123,8 +120,7 @@ def agent_loop(
                 "role": "user",
                 "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
             }
-            if session is not None:
-                session.append(reminder)
+            session.append(reminder)
             results.append(reminder)
             rounds_since_plan = 0
         messages.extend(results)
@@ -132,13 +128,20 @@ def agent_loop(
         if compact_requested:
             messages[:] = compactor.compact_history(messages, active_request)
 
+# todo: ?
+def show_active_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
+    """处理缺失工具结果并展示会话，切换时清空不属于该会话的运行时计划。"""
+    interrupted_results = session.recover_pending_tools()
+    history.extend(interrupted_results)
+    PLAN.items = []
+    ui.show_session(history, title)
+    if interrupted_results:
+        print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
+    logger.info("当前会话文件：%s", session.path)
+
 
 def main() -> None:
-    """加载配置，读取用户运行时输入并启动一次 Agent 任务。"""
-    # 可显式传入历史文件继续会话；默认创建新会话。
-    parser = argparse.ArgumentParser(description="MiniAgent 中文命令行助手")
-    parser.add_argument("--resume", metavar="JSONL路径", help="加载已有会话并继续追加记录")
-    args = parser.parse_args()
+    """自动恢复最近会话，通过终端斜杠命令切换会话或开始提问。"""
     load_dotenv()
     log_path = setup_logging()
     logger.info("MiniAgent 启动，本次日志文件：%s", log_path)
@@ -151,45 +154,65 @@ def main() -> None:
 
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    if args.resume:
-        session, history = SessionStore.load(args.resume)
-        interrupted_results = session.recover_pending_tools()
-        history.extend(interrupted_results)
-        if interrupted_results:
-            print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
-        print(f"已加载历史会话：{session.path}")
+    ui = TerminalUI(os.getenv("MODEL", ""))
+    sessions = SessionStore.list_sessions()
+    title = "新会话"
+    startup_error = None
+    if sessions:
+        try:
+            session, history = SessionStore.load(sessions[0]["path"])
+            title = "已恢复上次会话"
+        except (OSError, ValueError) as error:
+            startup_error = str(error)
+            session, history = SessionStore.create(), []
     else:
         session = SessionStore.create()
         history = []
-    print(f"会话文件：{session.path}")
-    print("请输入问题或者任务，enter提交，输入q结束对话。")
+    show_active_session(session, history, ui, title)
+    if startup_error:
+        print(f"上次会话无法加载：{startup_error}\n已开启新会话，原文件未修改；可输入 /resume 选择其他会话。")
 
     while True:
         # 在读取本轮用户输入前触发 Hook，便于扩展输入提示前的行为。
         trigger_hooks("PreUserPromptSubmit")
         try:
-            user_request = input("请输入：").strip()
+            user_request = ui.read_input()
         except (EOFError, KeyboardInterrupt):
-            print("\n对话已断开，可使用 --resume 加载会话文件继续。")
+            print("\n结束对话，下次启动将自动恢复最近会话。")
             break
-        if user_request.lower() == "q":
+        if not user_request:
+            continue
+        if user_request == "/q":
             print("结束对话。")
             break
+        if user_request == "/new":
+            session, history = SessionStore.create(), []
+            show_active_session(session, history, ui, "新会话")
+            continue
+        if user_request == "/resume":
+            selected = ui.choose_session(SessionStore.list_sessions())
+            if selected is not None:
+                try:
+                    restored, restored_history = SessionStore.load(selected)
+                except (OSError, ValueError) as error:
+                    print(f"无法恢复该会话：{error}")
+                    continue
+                show_active_session(restored, restored_history, ui, "已恢复会话")
+                session, history = restored, restored_history
+            continue
+        if user_request.startswith("/"):
+            print("未知命令，可用命令：" + "、".join(COMMANDS))
+            continue
 
         history.append(session.start_turn(user_request))
         try:
             agent_loop(client, history, user_request, session=session)
         except KeyboardInterrupt:
-            print("\n本轮已中断，可使用 --resume 加载会话文件继续。")
+            print("\n本轮已中断，下次启动将自动恢复最近会话。")
             break
 
         # 打印模型最后一次返回的文本内容。
-        response_content = history[-1].content
-        if isinstance(response_content, list):
-            for block in response_content:
-                if getattr(block, "type", None) == "output_text":
-                    print(block.text)
-        print()
+        ui.show_items([history[-1]])
 
 
 if __name__ == "__main__":

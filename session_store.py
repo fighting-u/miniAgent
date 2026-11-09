@@ -48,6 +48,33 @@ class SessionStore:
         return cls(path.resolve())
 
     @classmethod
+    def list_sessions(cls, root: Path = SESSION_DIR) -> list[dict[str, Any]]:
+        """按最近写入时间列出会话，仅读取首条用户问题作为列表预览。"""
+        sessions = []
+        for path in root.glob("*/*/*/*.jsonl"):
+            try:
+                updated_at = path.stat().st_mtime
+                preview = "（空会话）"
+                with path.open("r", encoding="utf-8") as source:
+                    for line in source:
+                        record = json.loads(line)
+                        payload = record.get("payload", {})
+                        if payload.get("role") == "user":
+                            content = payload.get("content", "")
+                            if isinstance(content, list):
+                                content = " ".join(block.get("text", "") for block in content
+                                                   if isinstance(block, dict))
+                            preview = " ".join(str(content).split())
+                            preview = preview[:40] + ("…" if len(preview) > 40 else "")
+                            break
+            except OSError:
+                continue
+            except (ValueError, AttributeError, TypeError):
+                preview = "（记录格式异常）"
+            sessions.append({"path": path.resolve(), "updated_at": updated_at, "preview": preview})
+        return sorted(sessions, key=lambda item: (item["updated_at"], item["path"].name), reverse=True)
+
+    @classmethod
     def load(cls, path: str | Path) -> tuple["SessionStore", list[dict[str, Any]]]:
         """校验文件并恢复原始上下文，移除附加 metadata，不改写历史。"""
         store = cls(Path(path).resolve())
