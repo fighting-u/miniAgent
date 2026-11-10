@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 # 当前模块使用的日志记录器。
@@ -44,7 +44,7 @@ class ContextCompactor:
 
     def __init__(
         self,
-        client: OpenAI,
+        client: AsyncOpenAI,
         model: str,
         transcript_dir: Path = TRANSCRIPT_DIR,
         tool_results_dir: Path = TOOL_RESULTS_DIR,
@@ -470,9 +470,9 @@ class ContextCompactor:
             + conversation[-tail_chars:]
         )
 
-    def summarize_history(self, messages: list[Any]) -> str:
+    async def summarize_history(self, messages: list[Any]) -> str:
         """调用 Responses API，把给定历史提炼成事实性续接摘要。"""
-        response = self.client.responses.create(
+        response = await self.client.responses.create(
             model=self.model,
             instructions=(
                 "请把提供的编码智能体对话总结为可继续工作的事实状态。"
@@ -496,12 +496,12 @@ class ContextCompactor:
             ),
         }
 
-    def compact_history(self, messages: list[Any], active_request: str) -> list[Any]:
+    async def compact_history(self, messages: list[Any], active_request: str) -> list[Any]:
         """第五步：归档全部历史，并用一条包含模型摘要的用户消息替换它。"""
         before_chars = self.estimate_chars(messages)
         transcript = self.write_transcript(messages)
         logger.info("[上下文压缩 5/5] 完整历史已保存：%s", transcript)
-        summary = self.summarize_history(messages)
+        summary = await self.summarize_history(messages)
         compacted_messages = [
             self.summary_message("上下文已压缩", active_request, summary, transcript)
         ]
@@ -512,7 +512,7 @@ class ContextCompactor:
         )
         return compacted_messages
 
-    def reactive_compact(self, messages: list[Any], active_request: str) -> list[Any]:
+    async def reactive_compact(self, messages: list[Any], active_request: str) -> list[Any]:
         """请求因上下文过长被拒绝时，总结旧历史并完整保留最近五条消息项。"""
         before_chars = self.estimate_chars(messages)
         transcript = self.write_transcript(messages)
@@ -521,7 +521,7 @@ class ContextCompactor:
         _, tail_start = self.safe_snip_boundaries(messages, 0, tail_start)
 
         old_history = messages[:tail_start] if tail_start else messages
-        summary = self.summarize_history(old_history)
+        summary = await self.summarize_history(old_history)
         compacted = self.summary_message("响应式上下文压缩", active_request, summary, transcript)
         compacted_messages = [compacted, *messages[tail_start:]] if tail_start else [compacted]
         logger.warning(
@@ -532,7 +532,7 @@ class ContextCompactor:
         )
         return compacted_messages
 
-    def prepare(self, messages: list[Any], active_request: str) -> list[Any]:
+    async def prepare(self, messages: list[Any], active_request: str) -> list[Any]:
         """在每次模型请求前依次执行五步上下文压缩管线。"""
         messages = self.tool_result_budget(messages)
         messages = self.snip_compact(messages)
@@ -547,7 +547,7 @@ class ContextCompactor:
                     self.estimate_chars(messages),
                     CONTEXT_CHAR_LIMIT,
                 )
-                messages = self.compact_history(messages, active_request)
+                messages = await self.compact_history(messages, active_request)
         return messages
 
 

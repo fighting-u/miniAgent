@@ -1,10 +1,12 @@
+import asyncio
 import json
 import logging
 import os
+from copy import deepcopy
 from typing import Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
@@ -27,12 +29,13 @@ PLAN_REMINDER_INTERVAL = 3
 MAX_REACTIVE_COMPACT_RETRIES = 1
 
 
-def agent_loop(
-    client: OpenAI, messages: list[Any], active_request: str, session: SessionStore
+async def agent_loop(
+    client: AsyncOpenAI, messages: list[Any], active_request: str, session: SessionStore,
+    background_tasks: list[asyncio.Task[int]],
 ) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
-    relevant_memories = load_memories(client, messages)
+    relevant_memories = await load_memories(client, messages)
     instructions = build_system_prompt(relevant_memories)
     # 记录连续多少轮工具调用没有使用计划工具。
     rounds_since_plan = 0
@@ -44,16 +47,16 @@ def agent_loop(
     model_name = os.getenv("MODEL", "")
     while True:
         # 每次请求模型前依次执行确定性裁剪，必要时再生成历史摘要。
-        messages[:] = compactor.prepare(messages, active_request)
+        messages[:] = await compactor.prepare(messages, active_request)
         # 发送当前对话，请求模型继续推理或调用工具。
         try:
-            response = client.responses.create(model=model_name, instructions=instructions, input=messages, tools=TOOLS)
+            response = await client.responses.create(model=model_name, instructions=instructions, input=messages, tools=TOOLS)
             # print(response.output)
             reactive_retries = 0
         except Exception as error:
             if is_context_length_error(error) and reactive_retries < MAX_REACTIVE_COMPACT_RETRIES:
                 logger.warning("模型请求因上下文过长被拒绝，开始响应式压缩并重试")
-                messages[:] = compactor.reactive_compact(messages, active_request)
+                messages[:] = await compactor.reactive_compact(messages, active_request)
                 reactive_retries += 1
                 continue
             raise
@@ -78,8 +81,10 @@ def agent_loop(
                 TerminalUI.show_items([forced_message])
                 continue
             # todo: 应该异步，不然等半天
+            # 已使用后台任务执行，并由 main 在退出前统一等待。
             # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
-            extract_memories(client, messages)
+            # 提取本轮结束时的快照，不受后续追加消息和上下文压缩影响。
+            background_tasks.append(asyncio.create_task(extract_memories(client, deepcopy(messages))))
             return
 
         # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
@@ -134,9 +139,9 @@ def agent_loop(
         messages.extend(results)
         # 等同普通工具一样先保留调用和结果配对，再整体归档并生成摘要。
         if compact_requested:
-            messages[:] = compactor.compact_history(messages, active_request)
+            messages[:] = await compactor.compact_history(messages, active_request)
 
-# todo: ?
+# todo: 这个其实可以移到 session_store.py 里
 def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
     """处理缺失工具结果并展示会话，切换时清空不属于该会话的运行时计划。"""
     interrupted_results = session.recover_pending_tools()
@@ -148,7 +153,7 @@ def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, 
     logger.info("当前会话文件：%s", session.path)
 
 
-def main() -> None:
+async def main() -> None:
     """自动恢复最近会话，通过终端斜杠命令切换会话或开始提问。"""
     load_dotenv()
     log_path = setup_logging()
@@ -160,89 +165,107 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("未找到 API_KEY，请先在 .env 中配置。")
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    ui = TerminalUI(os.getenv("MODEL", ""))
-    sessions = SessionStore.list_sessions()
-    title = "新会话"
-    startup_error = None
-    if sessions:
-        try:
-            session, history = SessionStore.load(sessions[0]["path"])
-            title = "已恢复上次会话"
-        except (OSError, ValueError) as error:
-            startup_error = str(error)
-            session, history = SessionStore.create(), []
-    else:
-        session = SessionStore.create()
-        history = []
-    activate_session(session, history, ui, title)
-    if startup_error:
-        print(f"上次会话无法加载：{startup_error}\n已开启新会话，原文件未修改；可输入 /resume 选择其他会话。")
-
-    while True:
-        # 在读取本轮用户输入前触发 Hook，便于扩展输入提示前的行为。
-        trigger_hooks("PreUserPromptSubmit")
-        try:
-            user_request = ui.read_input()
-        except (EOFError, KeyboardInterrupt):
-            print("\n结束对话，下次启动将自动恢复最近会话。")
-            break
-        if not user_request:
-            continue
-        if user_request == "/q":
-            print("结束对话。")
-            break
-        if user_request == "/new":
-            session, history = SessionStore.create(), []
-            activate_session(session, history, ui, "新会话")
-            continue
-        if user_request == "/resume":
-            selected = ui.choose_session(SessionStore.list_sessions())
-            if selected is not None:
-                try:
-                    restored, restored_history = SessionStore.load(selected)
-                except (OSError, ValueError) as error:
-                    print(f"无法恢复该会话：{error}")
-                    continue
-                activate_session(restored, restored_history, ui, "已恢复会话")
-                session, history = restored, restored_history
-            continue
-        if user_request == "/delete":
-            available_sessions = SessionStore.list_sessions()
-            selected = ui.choose_session(available_sessions, action="删除")
-            if selected is None:
-                continue
-            selected_info = next(item for item in available_sessions if item["path"] == selected)
-            is_current = selected == session.path
-            if not ui.confirm_delete(selected_info, is_current):
-                print("已取消删除。")
-                continue
+    # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
+    background_tasks: list[asyncio.Task[int]] = []
+    try:
+        ui = TerminalUI(os.getenv("MODEL", ""))
+        sessions = SessionStore.list_sessions()
+        title = "新会话"
+        startup_error = None
+        if sessions:
             try:
-                SessionStore.delete(selected)
+                session, history = SessionStore.load(sessions[0]["path"])
+                title = "已恢复上次会话"
             except (OSError, ValueError) as error:
-                print(f"删除失败：{error}")
-                continue
-            logger.info("已删除会话文件：%s", selected)
-            if is_current:
+                startup_error = str(error)
                 session, history = SessionStore.create(), []
-                activate_session(session, history, ui, "当前会话已删除，已开启新会话")
-            else:
-                print("已删除所选会话文件，此操作无法通过程序恢复。")
-            continue
-        if user_request.startswith("/"):
-            print("未知命令，可用命令：" + "、".join(COMMANDS))
-            continue
+        else:
+            session = SessionStore.create()
+            history = []
+        activate_session(session, history, ui, title)
+        if startup_error:
+            print(f"上次会话无法加载：{startup_error}\n已开启新会话，原文件未修改；可输入 /resume 选择其他会话。")
 
-        history.append(session.start_turn(user_request))
+        while True:
+            # 在读取本轮用户输入前触发 Hook，便于扩展输入提示前的行为。
+            trigger_hooks("PreUserPromptSubmit")
+            try:
+                user_request = await ui.read_input()
+            except (EOFError, KeyboardInterrupt):
+                print("\n结束对话，下次启动将自动恢复最近会话。")
+                break
+            if not user_request:
+                continue
+            if user_request == "/q":
+                print("结束对话。")
+                break
+            if user_request == "/new":
+                session, history = SessionStore.create(), []
+                activate_session(session, history, ui, "新会话")
+                continue
+            if user_request == "/resume":
+                selected = await ui.choose_session(SessionStore.list_sessions())
+                if selected is not None:
+                    try:
+                        restored, restored_history = SessionStore.load(selected)
+                    except (OSError, ValueError) as error:
+                        print(f"无法恢复该会话：{error}")
+                        continue
+                    activate_session(restored, restored_history, ui, "已恢复会话")
+                    session, history = restored, restored_history
+                continue
+            if user_request == "/delete":
+                available_sessions = SessionStore.list_sessions()
+                selected = await ui.choose_session(available_sessions, action="删除")
+                if selected is None:
+                    continue
+                selected_info = next(item for item in available_sessions if item["path"] == selected)
+                is_current = selected == session.path
+                if not await ui.confirm_delete(selected_info, is_current):
+                    print("已取消删除。")
+                    continue
+                try:
+                    SessionStore.delete(selected)
+                except (OSError, ValueError) as error:
+                    print(f"删除失败：{error}")
+                    continue
+                logger.info("已删除会话文件：%s", selected)
+                if is_current:
+                    session, history = SessionStore.create(), []
+                    activate_session(session, history, ui, "当前会话已删除，已开启新会话")
+                else:
+                    print("已删除所选会话文件，此操作无法通过程序恢复。")
+                continue
+            if user_request.startswith("/"):
+                print("未知命令，可用命令：" + "、".join(COMMANDS))
+                continue
+
+            history.append(session.start_turn(user_request))
+            try:
+                await agent_loop(client, history, user_request, session=session, background_tasks=background_tasks)
+            except KeyboardInterrupt:
+                print("\n本轮已中断，下次启动将自动恢复最近会话。")
+                break
+
+            # 模型文本和工具交互已在循环中逐步展示，不重复打印最后的回答。
+    except asyncio.CancelledError:
+        # asyncio.run 在收到 Ctrl+C 时可能取消主任务，仍先完成后台任务收尾。
+        print("\n本轮已中断，下次启动将自动恢复最近会话。")
+    finally:
         try:
-            agent_loop(client, history, user_request, session=session)
-        except KeyboardInterrupt:
-            print("\n本轮已中断，下次启动将自动恢复最近会话。")
-            break
-
-        # 模型文本和工具交互已在循环中逐步展示，不重复打印最后的回答。
+            if background_tasks:
+                if any(not task.done() for task in background_tasks):
+                    print("正在等待后台记忆提取完成……")
+                results = await asyncio.gather(*background_tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, BaseException):
+                        logger.warning("后台记忆提取任务未正常完成：%s", result)
+        finally:
+            # 所有后台请求结束后再关闭共享客户端，随后 main 返回并关闭事件循环。
+            await client.close()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

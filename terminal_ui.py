@@ -10,6 +10,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_completions
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import clear
 from prompt_toolkit.styles import Style
 
@@ -120,11 +121,13 @@ class TerminalUI:
             bottom_toolbar=f"{model_name} · {Path.cwd()}\n/new 新对话   /resume 历史会话   /delete 删除会话   /q 退出",
         )
 
-    def read_input(self) -> str:
+    async def read_input(self) -> str:
         """读取一次有效用户输入，空白回车保留在同一个输入框。"""
-        return self.prompt.prompt().strip()
+        # 等待输入时允许后台任务继续运行，后台输出自动避让当前输入框。
+        with patch_stdout():
+            return (await self.prompt.prompt_async()).strip()
 
-    def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> Path | None:
+    async def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> Path | None:
         """复用同一个会话选择列表，供恢复或删除使用，取消时不改变当前会话。"""
         if not sessions:
             print("暂无可选择的会话。")
@@ -142,7 +145,8 @@ class TerminalUI:
 
         while True:
             try:
-                choice = selector.prompt(pre_run=show_choices).strip()
+                with patch_stdout():
+                    choice = (await selector.prompt_async(pre_run=show_choices)).strip()
             except (EOFError, KeyboardInterrupt):
                 return None
             if not choice:
@@ -151,7 +155,7 @@ class TerminalUI:
                 return sessions[int(choice) - 1]["path"]
             print("请输入列表内的有效序号，或按 Ctrl+C 取消。")
 
-    def confirm_delete(self, session_info: dict[str, Any], is_current: bool) -> bool:
+    async def confirm_delete(self, session_info: dict[str, Any], is_current: bool) -> bool:
         """显示选中会话的时间和问题，只有明确输入 y 或 yes 才允许删除。"""
         timestamp = datetime.fromtimestamp(session_info["updated_at"]).strftime("%Y-%m-%d %H:%M")
         print(f"准备删除：{timestamp}  {session_info['preview']}")
@@ -160,7 +164,8 @@ class TerminalUI:
             print("这是当前会话，删除后将清屏并开启新会话。")
         confirmation = PromptSession(style=UI_STYLE)
         try:
-            answer = confirmation.prompt("确认删除？[y/N] ").strip().casefold()
+            with patch_stdout():
+                answer = (await confirmation.prompt_async("确认删除？[y/N] ")).strip().casefold()
         except (EOFError, KeyboardInterrupt):
             return False
         return answer in {"y", "yes"}

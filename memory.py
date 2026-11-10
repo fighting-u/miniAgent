@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 # 当前模块使用的日志记录器。
@@ -202,8 +202,8 @@ def keyword_memory_selection(
     return []
 
 
-def select_relevant_memories(
-    client: OpenAI, messages: list[Any], max_items: int = MAX_RECALL_ITEMS
+async def select_relevant_memories(
+    client: AsyncOpenAI, messages: list[Any], max_items: int = MAX_RECALL_ITEMS
 ) -> list[str]:
     """调用辅助模型，从摘要目录中选择与当前请求相关的记忆文件。"""
     records = list_memory_previews()
@@ -223,7 +223,7 @@ def select_relevant_memories(
     )
 
     try:
-        response = client.responses.create(
+        response = await client.responses.create(
             model=os.getenv("MODEL"),
             instructions="你是长期记忆召回助手，只能返回符合要求的 JSON 数组。",
             input=prompt,
@@ -243,11 +243,11 @@ def select_relevant_memories(
         return keyword_memory_selection(records, query, max_items)
 
 
-def load_memories(client: OpenAI, messages: list[Any]) -> str:
+async def load_memories(client: AsyncOpenAI, messages: list[Any]) -> str:
     """读取辅助模型选中的记忆全文，并限制单次自动召回总字符数。"""
     loaded = []
     remaining = RECALL_CHAR_LIMIT
-    for filename in select_relevant_memories(client, messages):
+    for filename in await select_relevant_memories(client, messages):
         content = read_memory_file(filename)
         if not content or remaining <= 0:
             continue
@@ -277,7 +277,7 @@ def write_memory_file(name: str, memory_type: str, description: str, body: str) 
     return memory_path
 
 
-def extract_memories(client: OpenAI, messages: list[Any]) -> int:
+async def extract_memories(client: AsyncOpenAI, messages: list[Any]) -> int:
     """调用辅助模型提取长期信息，并把有效结果分别写入记忆文件。"""
     dialogue = dialogue_text(messages)
     if not dialogue:
@@ -292,7 +292,7 @@ def extract_memories(client: OpenAI, messages: list[Any]) -> int:
         "只提取可能在未来会话中有用的长期信息。\n"
         "允许的类型只有：user_preference（用户偏好）和 "
         "project_convention（具体项目的长期要求、稳定事实、文档位置等约定）。\n"
-        "你认为只适用于本轮对话的信息，对未来对话没太多价值的就不用提取。\n"
+        "你认为只适用于本轮对话的信息，对未来对话没太多价值以及无关紧要信息的就不用提取。\n"
         "返回 JSON 数组，每个对象必须包含 name、type、description、body 四个字段。"
         "name 应简短明确，description 用于目录预览，body 保存完整信息。\n"
         "已有记忆只有摘要预览，不能据此覆盖或修改旧记忆。你认为没有可提取的长期记忆时返回 []。\n\n"
@@ -301,7 +301,7 @@ def extract_memories(client: OpenAI, messages: list[Any]) -> int:
     )
 
     try:
-        response = client.responses.create(
+        response = await client.responses.create(
             model=os.getenv("MODEL"),
             instructions="你是长期记忆提取助手，只能返回符合要求的 JSON 数组。",
             input=prompt,
