@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "httpx[socks]>=0.27.0",
+    # MCP 客户端 SDK；使用兼容项目 Python 3.10 要求的 1.x 接口。
+    "mcp>=1.26.0,<2",
     "openai>=1.66.0",
     # 提供终端输入占位提示与斜杠命令补全菜单。
     "prompt-toolkit>=3.0.52",

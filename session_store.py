@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from datetime import datetime
 from pathlib import Path
@@ -6,6 +7,12 @@ from typing import Any
 
 from uuid6 import uuid7
 
+from terminal_ui import TerminalUI
+from tools import PLAN
+
+
+# 当前模块的会话激活日志记录器。
+logger = logging.getLogger(__name__)
 
 # 会话文件保存到项目根目录，不受启动命令的当前目录影响。
 SESSION_DIR = Path(__file__).resolve().parent / "sessions"
@@ -194,3 +201,15 @@ class SessionStore:
             self.append(result)
             results.append(result)
         return results
+
+
+# todo: 这个其实可以移到 session_store.py 里
+def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
+    """处理缺失工具结果并展示会话，切换时清空不属于该会话的运行时计划。"""
+    interrupted_results = session.recover_pending_tools()
+    history.extend(interrupted_results)
+    PLAN.items = []
+    ui.show_session(history, title)
+    if interrupted_results:
+        print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
+    logger.info("当前会话文件：%s", session.path)

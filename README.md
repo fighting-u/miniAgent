@@ -6,11 +6,13 @@
 ```text
 miniAgent/
 ├── core.py                     # Agent 主入口，负责对话循环、模型请求和工具调度
-├── session_store.py            # 会话 JSONL 的创建、追加、加载与中断工具结果处理
+├── session_store.py            # 会话 JSONL 的创建、追加、加载、激活与中断工具结果处理
 ├── terminal_ui.py              # 终端输入、斜杠菜单、会话选择与历史展示
 ├── context_compactor.py        # 上下文压缩管线，负责工具结果落盘、历史裁剪和摘要
 ├── logging_config.py           # 配置仅写入文件的诊断日志
-├── tools.py                    # 工具定义、工具处理函数和任务计划管理
+├── tools.py                    # 工具初始化与组装、工具处理函数和任务计划管理
+├── mcp_client.py               # stdio MCP 连接、工具发现和调用
+├── .mcp.json                   # MCP 服务器启动配置，默认不连接任何服务器
 ├── hook.py                     # Hook 注册与触发，包含权限检查和运行日志扩展
 ├── memory.py                   # 负责长期记忆的提取、文件存储和按需召回
 ├── system_prompt.py            # 构建并导出发送给模型的系统提示词
@@ -25,9 +27,10 @@ miniAgent/
 │   ├── 长期记忆设计.md          # 稳定信息的提取、存储和按需召回
 │   ├── mcp接入设计.md           # MCP 接入准备与待实现范围
 │   └── 记录.md                  # 项目学习记录
-├── tests/                      # 持久化专项测试
+├── tests/                      # 持久化与 MCP 专项测试
 │   ├── test_sessions.py        # 本地 SDK、工具循环与加载恢复测试
-│   └── live_sessions.py        # 真实 API 跨进程断开续聊测试
+│   ├── live_sessions.py        # 真实 API 跨进程断开续聊测试
+│   └── live_mcp.py             # 临时真实 MCP 服务与主 LLM 的单次工具调用测试
 ├── sessions/                   # 运行时会话记录，按创建日期和 UUIDv7 存放
 ├── .memory/                    # 长期记忆目录，每条记忆保存为独立 Markdown 文件
 ├── logs/                       # 运行时日志目录，每次启动生成独立日志文件
@@ -35,6 +38,24 @@ miniAgent/
 ├── README.md                    # 项目说明文档
 └── AGENTS.md                    # 项目开发与协作约定
 ```
+
+## MCP 配置
+
+在项目根目录的 `.mcp.json` 中配置 stdio 服务；默认 `{"mcpServers": {}}`，仅使用内置工具。例如（将脚本路径替换为实际服务）：
+
+```json
+{
+  "mcpServers": {
+    "demo": {
+      "command": "D:/projects/others/miniAgent/.venv/Scripts/python.exe",
+      "args": ["D:/mcp/server.py"],
+      "env": {"PYTHONIOENCODING": "utf-8"}
+    }
+  }
+}
+```
+
+启动后后台连接，在首次主模型请求前等待工具准备完成；后续对话复用连接。`env` 为显式字符串配置，不进行 `${变量}` 展开；服务标准输出须用于 MCP 协议。完整约定与测试入口见 [MCP 接入设计](docs/mcp接入设计.md)。
 
 ## 会话持久化设计
 

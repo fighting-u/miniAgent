@@ -12,14 +12,14 @@ from context_compactor import ContextCompactor, is_context_length_error
 from hook import trigger_hooks
 from logging_config import setup_logging
 from memory import extract_memories, load_memories
-from session_store import SessionStore
+from mcp_client import MCPClient
+from session_store import SessionStore, activate_session
 from system_prompt import build_system_prompt
 from terminal_ui import COMMANDS, TerminalUI
-from tools import PLAN, TOOL_HANDLERS, TOOLS
+from tools import PLAN, TOOL_HANDLERS, TOOLS, initialize_tools
 
 
 # 当前模块使用的日志记录器。
-# todo: 日志要调整下，终端不用输出没什么用的内容
 logger = logging.getLogger(__name__)
 
 # 连续多少轮未更新计划后，向模型追加一次规划提醒。
@@ -32,11 +32,14 @@ MAX_REACTIVE_COMPACT_RETRIES = 1
 async def agent_loop(
     client: AsyncOpenAI, messages: list[Any], active_request: str, session: SessionStore,
     background_tasks: list[asyncio.Task[int]],
+    mcp: MCPClient | None = None, tools_ready: asyncio.Task | None = None,
 ) -> None:
     """持续请求模型并执行工具，直到模型返回最终文本。"""
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
     relevant_memories = await load_memories(client, messages)
     instructions = build_system_prompt(relevant_memories)
+    # 辅助召回无需等待 MCP，主模型请求前必须取得完整工具列表。
+    available_tools = await tools_ready if tools_ready is not None else TOOLS
     # 记录连续多少轮工具调用没有使用计划工具。
     rounds_since_plan = 0
     # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
@@ -50,7 +53,7 @@ async def agent_loop(
         messages[:] = await compactor.prepare(messages, active_request)
         # 发送当前对话，请求模型继续推理或调用工具。
         try:
-            response = await client.responses.create(model=model_name, instructions=instructions, input=messages, tools=TOOLS)
+            response = await client.responses.create(model=model_name, instructions=instructions, input=messages, tools=available_tools)
             # print(response.output)
             reactive_retries = 0
         except Exception as error:
@@ -80,7 +83,6 @@ async def agent_loop(
                 messages.append(forced_message)
                 TerminalUI.show_items([forced_message])
                 continue
-            # todo: 应该异步，不然等半天
             # 已使用后台任务执行，并由 main 在退出前统一等待。
             # Agent 确定结束本轮循环后，调用辅助模型提取并存储长期记忆。
             # 提取本轮结束时的快照，不受后续追加消息和上下文压缩影响。
@@ -110,6 +112,9 @@ async def agent_loop(
                     output = "已收到主动压缩请求，将在本轮工具调用全部结束后压缩上下文。"
                     compact_requested = True
                     logger.info("模型主动请求压缩上下文")
+                # todo: 是否能统一调用呢？就算不能统一调用，这部分确实也该写成个统一的execute_tool()，不该加重主函数
+                elif mcp is not None and tool_call.name in mcp.routes:
+                    output = await mcp.call_tool(tool_call.name, arguments)
                 else:
                     handler = TOOL_HANDLERS.get(tool_call.name)
                     output = str(handler(**arguments)) if handler else f"未知工具: {tool_call.name}"
@@ -141,18 +146,6 @@ async def agent_loop(
         if compact_requested:
             messages[:] = await compactor.compact_history(messages, active_request)
 
-# todo: 这个其实可以移到 session_store.py 里
-def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, title: str) -> None:
-    """处理缺失工具结果并展示会话，切换时清空不属于该会话的运行时计划。"""
-    interrupted_results = session.recover_pending_tools()
-    history.extend(interrupted_results)
-    PLAN.items = []
-    ui.show_session(history, title)
-    if interrupted_results:
-        print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
-    logger.info("当前会话文件：%s", session.path)
-
-
 async def main() -> None:
     """自动恢复最近会话，通过终端斜杠命令切换会话或开始提问。"""
     load_dotenv()
@@ -166,6 +159,10 @@ async def main() -> None:
         raise RuntimeError("未找到 API_KEY，请先在 .env 中配置。")
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+    # 启动即连接 MCP，与终端输入和辅助模型召回并行。
+    mcp = MCPClient()
+    tools_ready = asyncio.create_task(initialize_tools(mcp))
 
     # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
     background_tasks: list[asyncio.Task[int]] = []
@@ -244,7 +241,9 @@ async def main() -> None:
 
             history.append(session.start_turn(user_request))
             try:
-                await agent_loop(client, history, user_request, session=session, background_tasks=background_tasks)
+                # todo：传那么多参数，是否会太乱以及不易维护？
+                await agent_loop(client, history, user_request, session=session, background_tasks=background_tasks,
+                                 mcp=mcp, tools_ready=tools_ready)
             except KeyboardInterrupt:
                 print("\n本轮已中断，下次启动将自动恢复最近会话。")
                 break
@@ -264,7 +263,10 @@ async def main() -> None:
                         logger.warning("后台记忆提取任务未正常完成：%s", result)
         finally:
             # 所有后台请求结束后再关闭共享客户端，随后 main 返回并关闭事件循环。
-            await client.close()
+            try:
+                await mcp.close(tools_ready)
+            finally:
+                await client.close()
 
 
 if __name__ == "__main__":

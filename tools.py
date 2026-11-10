@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 import subprocess
 from typing import Any
+from copy import deepcopy
 
 from memory import load_memory
+from mcp_client import MCPClient
 from skill import SKILL_LOADER
 
 
@@ -310,3 +312,20 @@ TOOL_HANDLERS = {
     "load_skill": SKILL_LOADER.load,
     "load_memory": load_memory,
 }
+
+
+def assemble_tools(mcp_tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """组合内置与 MCP 工具，检查重名并返回独立列表，不修改全局定义。"""
+    combined = deepcopy([*TOOLS, *mcp_tools])
+    names = [tool["name"] for tool in combined]
+    # ？怎么命名的
+    if len(names) != len(set(names)):
+        raise ValueError("内置工具与 MCP 工具名称冲突")
+    return combined
+
+
+# todo:放在这里合适吗？
+async def initialize_tools(mcp: MCPClient) -> list[dict[str, Any]]:
+    """等待 MCP 发现完成后，通过工具模块组装完整定义列表。"""
+    await mcp.initialize()
+    return assemble_tools(mcp.tools)
