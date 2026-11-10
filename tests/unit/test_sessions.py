@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
@@ -14,10 +15,14 @@ import httpx
 from openai import OpenAI
 from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
 
-import core
-import tools
-from context_compactor import ContextCompactor
-from session_store import API_FORMAT, SessionStore, omit_none
+# 脚本迁入子目录后，仍可从项目根目录直接运行或通过 unittest 发现。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.agent import core
+from src.tools import tools
+from src.context.context_compactor import ContextCompactor
+from src.session.session_store import API_FORMAT, SessionStore, omit_none
 
 
 def assistant_message(text: str) -> dict:

@@ -8,15 +8,15 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-from context_compactor import ContextCompactor, is_context_length_error
-from hook import trigger_hooks
-from logging_config import setup_logging
-from memory import extract_memories, load_memories
-from mcp_client import MCPClient
-from session_store import SessionStore, activate_session
-from system_prompt import build_system_prompt
-from terminal_ui import COMMANDS, TerminalUI
-from tools import PLAN, TOOL_HANDLERS, TOOLS, initialize_tools
+from src.context.context_compactor import ContextCompactor, is_context_length_error
+from src.agent.hook import trigger_hooks
+from src.common.logging_config import setup_logging
+from src.memory.memory import extract_memories, load_memories
+from src.tools.mcp_client import MCPClient
+from src.session.session_store import SessionStore, activate_session
+from src.agent.system_prompt import build_system_prompt
+from src.ui.terminal_ui import COMMANDS, TerminalUI
+from src.tools.tools import PLAN, TOOL_HANDLERS, TOOLS, initialize_tools
 
 
 # 当前模块使用的日志记录器。
@@ -268,6 +268,3 @@ async def main() -> None:
             finally:
                 await client.close()
 
-
-if __name__ == "__main__":
-    asyncio.run(main())

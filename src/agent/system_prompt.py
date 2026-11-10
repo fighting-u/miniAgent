@@ -1,6 +1,6 @@
-from memory import memory_catalog
-from skill import SKILL_LOADER
-from tools import WORKDIR
+from src.memory.memory import memory_catalog
+from src.tools.skill import SKILL_LOADER
+from src.tools.tools import WORKDIR
 
 
 def build_system_prompt(relevant_memories: str = "") -> str:

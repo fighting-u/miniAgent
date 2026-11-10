@@ -6,9 +6,9 @@ import subprocess
 from typing import Any
 from copy import deepcopy
 
-from memory import load_memory
-from mcp_client import MCPClient
-from skill import SKILL_LOADER
+from src.memory.memory import load_memory
+from src.tools.mcp_client import MCPClient
+from src.tools.skill import SKILL_LOADER
 
 
 # PowerShell 单次执行的最长时间，单位为秒。

@@ -5,18 +5,27 @@
 
 ```text
 miniAgent/
-├── core.py                     # Agent 主入口，负责对话循环、模型请求和工具调度
-├── session_store.py            # 会话 JSONL 的创建、追加、加载、激活与中断工具结果处理
-├── terminal_ui.py              # 终端输入、斜杠菜单、会话选择与历史展示
-├── context_compactor.py        # 上下文压缩管线，负责工具结果落盘、历史裁剪和摘要
-├── logging_config.py           # 配置仅写入文件的诊断日志
-├── tools.py                    # 工具初始化与组装、工具处理函数和任务计划管理
-├── mcp_client.py               # stdio / Streamable HTTP MCP 连接、工具发现和调用
+├── src/                        # Python 源码包，各子目录通过 __init__.py 标记为包
+│   ├── __main__.py             # python -m src 启动入口
+│   ├── agent/                  # Agent 主流程
+│   │   ├── core.py             # 对话循环、模型请求和工具调度
+│   │   ├── hook.py             # Hook 注册、权限检查和运行日志扩展
+│   │   └── system_prompt.py    # 构建模型系统提示词
+│   ├── tools/                  # 工具与扩展接入
+│   │   ├── tools.py            # 工具初始化、处理函数和任务计划管理
+│   │   ├── mcp_client.py       # MCP 连接、工具发现和调用
+│   │   └── skill.py            # 本地技能发现与按需加载
+│   ├── memory/                 # 长期记忆
+│   │   └── memory.py           # 长期记忆提取、存储和召回
+│   ├── context/                # 对话上下文压缩
+│   │   └── context_compactor.py # 工具结果落盘、历史裁剪和摘要
+│   ├── session/
+│   │   └── session_store.py    # 会话 JSONL 存储、恢复与激活
+│   ├── ui/
+│   │   └── terminal_ui.py      # 终端输入、菜单和历史展示
+│   └── common/
+│       └── logging_config.py   # 文件诊断日志配置
 ├── .mcp.json                   # MCP 服务器启动配置，默认不连接任何服务器
-├── hook.py                     # Hook 注册与触发，包含权限检查和运行日志扩展
-├── memory.py                   # 负责长期记忆的提取、文件存储和按需召回
-├── system_prompt.py            # 构建并导出发送给模型的系统提示词
-├── skill.py                    # 发现、列出并按需加载本地技能
 ├── skills/                     # 本地技能目录
 │   └── code-review/
 │       └── SKILL.md            # 代码审查技能的元数据和完整说明
@@ -27,11 +36,13 @@ miniAgent/
 │   ├── 长期记忆设计.md          # 稳定信息的提取、存储和按需召回
 │   ├── mcp接入设计.md           # MCP 接入准备与待实现范围
 │   └── 记录.md                  # 项目学习记录
-├── tests/                      # 持久化与 MCP 专项测试
-│   ├── test_sessions.py        # 本地 SDK、工具循环与加载恢复测试
-│   ├── live_sessions.py        # 真实 API 跨进程断开续聊测试
-│   ├── live_mcp.py             # 临时真实 stdio MCP 与主 LLM 的单次工具调用测试
-│   └── live_mcp_http.py        # HTTP MCP 鉴权、主 LLM 调用及会话关闭测试
+├── tests/                      # 测试目录，子目录通过 __init__.py 支持递归发现
+│   ├── unit/
+│   │   └── test_sessions.py    # 本地 SDK、工具循环与加载恢复测试
+│   └── integration/
+│       ├── live_sessions.py    # 真实 API 跨进程断开续聊测试
+│       ├── live_mcp.py         # 真实 stdio MCP 与主 LLM 的工具调用测试
+│       └── live_mcp_http.py    # HTTP MCP 鉴权、工具调用及会话关闭测试
 ├── sessions/                   # 运行时会话记录，按创建日期和 UUIDv7 存放
 ├── .memory/                    # 长期记忆目录，每条记忆保存为独立 Markdown 文件
 ├── logs/                       # 运行时日志目录，每次启动生成独立日志文件
@@ -40,44 +51,8 @@ miniAgent/
 └── AGENTS.md                    # 项目开发与协作约定
 ```
 
-## MCP 配置
-
-在项目根目录的 `.mcp.json` 中配置 stdio 或 Streamable HTTP 服务；默认 `{"mcpServers": {}}`，仅使用内置工具。例如（将脚本路径和 URL 替换为实际服务）：
-
-```json
-{
-  "mcpServers": {
-    "demo": {
-      "command": "D:/projects/others/miniAgent/.venv/Scripts/python.exe",
-      "args": ["D:/mcp/server.py"],
-      "env": {"PYTHONIOENCODING": "utf-8"}
-    },
-    "remote": {
-      "type": "http",
-      "url": "http://127.0.0.1:8000/mcp",
-      "headers": {"Authorization": "Bearer YOUR_TOKEN"}
-    }
-  }
-}
-```
-
-启动后后台连接，在首次主模型请求前等待工具准备完成；后续对话复用连接。不写 `type` 时，有 `url` 按 HTTP 连接，否则按 stdio 启动。HTTP 的 `headers` 可省略；配置不进行 `${变量}` 展开。stdio 服务标准输出须用于 MCP 协议；关闭 HTTP 客户端只结束会话，不停止外部服务。完整约定与测试入口见 [MCP 接入设计](docs/mcp接入设计.md)。
-
-## 会话持久化设计
-
-格式约定见 [持久化设计](docs/持久化设计.md)，已实现消息追加与加载续聊，`compact` 记录尚未实现：
-
-- 每个会话保存为 `sessions/YYYY/MM/DD/<session-id>.jsonl`，会话标识使用 UUIDv7。
-- 外层 `type` 使用 `messages` 或 `compact`，通过 `ordinal` 和 `turn_id` 标识记录顺序与用户请求。
-- `payload` 保留 API 原始类型名，`payload.metadata` 补充 `api_format`；模型的 `message`、`reasoning` 另记录 `model_name`。
-- 省略 payload 中值为 `None` 的字段；恢复 API 输入时移除附加的 `metadata`。
-
-启动终端（PowerShell）：
+## 开始
 
 ```powershell
-.venv\Scripts\python.exe core.py
+python -m src
 ```
-
-启动时自动加载最近写入的会话并展示历史；没有会话时自动创建。输入 `/` 展开中文命令菜单：`/new` 新建、`/resume` 选择历史会话、`/delete` 选择并二次确认删除会话、`/q` 退出。会话列表仅展示选择序号、最近时间和截短的首条用户问题，不显示会话 ID。删除当前会话后自动清屏并开启新会话。
-
-工具调用缺少已保存结果时，恢复会补充“结果未确认”的说明，不自动重复执行工具。当前恢复范围为未压缩会话。界面约定见 [终端运行界面设计](docs/终端运行界面设计.md)。

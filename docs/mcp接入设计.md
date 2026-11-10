@@ -58,19 +58,19 @@ Streamable HTTP：连接已启动的 MCP 服务，`headers` 可省略。
 | 文件 | 职责 |
 | --- | --- |
 | `.mcp.json` | 配置服务器启动参数或 HTTP 地址、请求头。 |
-| `mcp_client.py` | 读取配置，管理连接，发现工具，维护路由并执行调用。 |
-| `tools.py` | `initialize_tools` 等待发现完成，`assemble_tools` 合并本地与 MCP 工具。 |
-| `core.py` | 后台启动初始化，主模型请求前等待工具就绪，分发调用并在退出时清理。 |
+| `src/tools/mcp_client.py` | 读取配置，管理连接，发现工具，维护路由并执行调用。 |
+| `src/tools/tools.py` | `initialize_tools` 等待发现完成，`assemble_tools` 合并本地与 MCP 工具。 |
+| `src/agent/core.py` | 后台启动初始化，主模型请求前等待工具就绪，分发调用并在退出时清理。 |
 | `pyproject.toml` | 声明 MCP SDK 依赖。 |
 | `README.md` | 项目文件结构与配置说明。 |
-| `tests/live_mcp.py` | 真实 stdio 服务与 LLM 单次工具调用测试。 |
-| `tests/live_mcp_http.py` | 真实 HTTP 服务测试，额外验证鉴权请求头和会话关闭。 |
+| `tests/integration/live_mcp.py` | 真实 stdio 服务与 LLM 单次工具调用测试。 |
+| `tests/integration/live_mcp_http.py` | 真实 HTTP 服务测试，额外验证鉴权请求头和会话关闭。 |
 
 ## 测试说明
 
 ```powershell
-.venv\Scripts\python.exe -B -X utf8 tests/live_mcp.py
-.venv\Scripts\python.exe -B -X utf8 tests/live_mcp_http.py
+.venv\Scripts\python.exe -B -X utf8 tests/integration/live_mcp.py
+.venv\Scripts\python.exe -B -X utf8 tests/integration/live_mcp_http.py
 ```
 
 测试启动临时 MCP 服务，复用实际 Agent 循环，验证工具发现、一次工具调用及最终回答。每项最多两次主模型请求，不调用辅助模型或触发压缩；成功或失败均清理临时进程和文件，保留测试脚本。

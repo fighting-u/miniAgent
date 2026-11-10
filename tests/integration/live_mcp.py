@@ -14,16 +14,16 @@ from openai import AsyncOpenAI
 
 
 # 从项目根目录导入实际接入代码，测试不生成 Python 缓存文件。
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import core
-from context_compactor import ContextCompactor
-from mcp_client import MCPClient
-from memory import message_text
-from session_store import SessionStore
-from tools import initialize_tools
+from src.agent import core
+from src.context.context_compactor import ContextCompactor
+from src.tools.mcp_client import MCPClient
+from src.memory.memory import message_text
+from src.session.session_store import SessionStore
+from src.tools.tools import initialize_tools
 
 
 # 临时真实 MCP 服务源码：只提供一个工具，执行次数和进程号写入临时目录。

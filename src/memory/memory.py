@@ -14,7 +14,7 @@ from openai import AsyncOpenAI
 logger = logging.getLogger(__name__)
 
 # 长期记忆目录，每条记忆保存为一个独立的 Markdown 文件。
-MEMORY_DIR = Path(__file__).resolve().parent / ".memory"
+MEMORY_DIR = Path(__file__).resolve().parents[2] / ".memory"
 
 # 辅助模型允许返回的长期记忆类型。
 MEMORY_TYPES = ("user_preference", "project_convention")

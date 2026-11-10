@@ -4,7 +4,7 @@ import yaml
 
 
 # 技能目录，每个技能使用一个子目录，并把完整说明写在子目录的 SKILL.md 中。
-SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
 
 
 class SkillLoader:

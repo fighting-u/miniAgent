@@ -13,14 +13,14 @@ from openai import OpenAI
 
 
 # 脚本可从项目根目录直接启动，复用实际核心循环与工具处理函数。
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-import core
-import tools
-from context_compactor import ContextCompactor
-from memory import message_text
-from session_store import SessionStore
+from src.agent import core
+from src.tools import tools
+from src.context.context_compactor import ContextCompactor
+from src.memory.memory import message_text
+from src.session.session_store import SessionStore
 
 
 def read_records(path: Path) -> list[dict]:

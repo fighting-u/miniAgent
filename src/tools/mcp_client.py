@@ -21,7 +21,7 @@ MCP_CALL_TIMEOUT = 30
 # HTTP 首次连接最多尝试三次，包含第一次连接。
 MCP_HTTP_CONNECT_ATTEMPTS = 3
 # 默认配置位于项目根目录；缺失时仅使用内置工具。
-MCP_CONFIG_PATH = Path(__file__).resolve().parent / ".mcp.json"
+MCP_CONFIG_PATH = Path(__file__).resolve().parents[2] / ".mcp.json"
 # 当前模块诊断日志记录器。
 logger = logging.getLogger(__name__)
 

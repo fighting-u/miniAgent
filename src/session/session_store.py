@@ -7,15 +7,15 @@ from typing import Any
 
 from uuid6 import uuid7
 
-from terminal_ui import TerminalUI
-from tools import PLAN
+from src.ui.terminal_ui import TerminalUI
+from src.tools.tools import PLAN
 
 
 # 当前模块的会话激活日志记录器。
 logger = logging.getLogger(__name__)
 
 # 会话文件保存到项目根目录，不受启动命令的当前目录影响。
-SESSION_DIR = Path(__file__).resolve().parent / "sessions"
+SESSION_DIR = Path(__file__).resolve().parents[2] / "sessions"
 
 # 当前持久化记录对应的 LLM API 协议格式。
 API_FORMAT = "openai_responses"
