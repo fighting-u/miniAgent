@@ -49,7 +49,7 @@ if __name__ == "__main__":
 '''
 
 
-async def run_test(root: Path) -> None:
+async def run_test(root: Path, server_settings: dict | None = None) -> None:
     """真实启动 MCP 并通过主模型完成一次调用，所有会话写入临时目录。"""
     load_dotenv(PROJECT_ROOT / ".env")
     if not os.getenv("MODEL") or not os.getenv("DASHSCOPE_API_KEY"):
@@ -59,7 +59,7 @@ async def run_test(root: Path) -> None:
     server = root / "server.py"
     server.write_text(SERVER_SOURCE, encoding="utf-8")
     config = root / ".mcp.json"
-    config.write_text(json.dumps({"mcpServers": {"smoke": {
+    config.write_text(json.dumps({"mcpServers": {"smoke": server_settings or {
         "command": sys.executable, "args": ["-B", str(server), str(root)],
     }}}), encoding="utf-8")
     mcp = MCPClient(config)
@@ -77,9 +77,10 @@ async def run_test(root: Path) -> None:
         definitions = await ready
         name = "mcp__smoke__reveal_token"
         assert name in {item["name"] for item in definitions}, "未发现测试工具"
-        pid = int((root / "server.pid").read_text(encoding="utf-8"))
-        handle = kernel.OpenProcess(0x100001, False, pid)
-        assert handle, "无法取得测试进程句柄"
+        if server_settings is None:
+            pid = int((root / "server.pid").read_text(encoding="utf-8"))
+            handle = kernel.OpenProcess(0x100001, False, pid)
+            assert handle, "无法取得测试进程句柄"
         session = SessionStore.create(root / "sessions")
         question = "请调用测试工具获取口令，然后只回复得到的口令。"
         messages = [session.start_turn(question)]

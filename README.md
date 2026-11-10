@@ -11,7 +11,7 @@ miniAgent/
 ├── context_compactor.py        # 上下文压缩管线，负责工具结果落盘、历史裁剪和摘要
 ├── logging_config.py           # 配置仅写入文件的诊断日志
 ├── tools.py                    # 工具初始化与组装、工具处理函数和任务计划管理
-├── mcp_client.py               # stdio MCP 连接、工具发现和调用
+├── mcp_client.py               # stdio / Streamable HTTP MCP 连接、工具发现和调用
 ├── .mcp.json                   # MCP 服务器启动配置，默认不连接任何服务器
 ├── hook.py                     # Hook 注册与触发，包含权限检查和运行日志扩展
 ├── memory.py                   # 负责长期记忆的提取、文件存储和按需召回
@@ -30,7 +30,8 @@ miniAgent/
 ├── tests/                      # 持久化与 MCP 专项测试
 │   ├── test_sessions.py        # 本地 SDK、工具循环与加载恢复测试
 │   ├── live_sessions.py        # 真实 API 跨进程断开续聊测试
-│   └── live_mcp.py             # 临时真实 MCP 服务与主 LLM 的单次工具调用测试
+│   ├── live_mcp.py             # 临时真实 stdio MCP 与主 LLM 的单次工具调用测试
+│   └── live_mcp_http.py        # HTTP MCP 鉴权、主 LLM 调用及会话关闭测试
 ├── sessions/                   # 运行时会话记录，按创建日期和 UUIDv7 存放
 ├── .memory/                    # 长期记忆目录，每条记忆保存为独立 Markdown 文件
 ├── logs/                       # 运行时日志目录，每次启动生成独立日志文件
@@ -41,7 +42,7 @@ miniAgent/
 
 ## MCP 配置
 
-在项目根目录的 `.mcp.json` 中配置 stdio 服务；默认 `{"mcpServers": {}}`，仅使用内置工具。例如（将脚本路径替换为实际服务）：
+在项目根目录的 `.mcp.json` 中配置 stdio 或 Streamable HTTP 服务；默认 `{"mcpServers": {}}`，仅使用内置工具。例如（将脚本路径和 URL 替换为实际服务）：
 
 ```json
 {
@@ -50,12 +51,17 @@ miniAgent/
       "command": "D:/projects/others/miniAgent/.venv/Scripts/python.exe",
       "args": ["D:/mcp/server.py"],
       "env": {"PYTHONIOENCODING": "utf-8"}
+    },
+    "remote": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {"Authorization": "Bearer YOUR_TOKEN"}
     }
   }
 }
 ```
 
-启动后后台连接，在首次主模型请求前等待工具准备完成；后续对话复用连接。`env` 为显式字符串配置，不进行 `${变量}` 展开；服务标准输出须用于 MCP 协议。完整约定与测试入口见 [MCP 接入设计](docs/mcp接入设计.md)。
+启动后后台连接，在首次主模型请求前等待工具准备完成；后续对话复用连接。不写 `type` 时，有 `url` 按 HTTP 连接，否则按 stdio 启动。HTTP 的 `headers` 可省略；配置不进行 `${变量}` 展开。stdio 服务标准输出须用于 MCP 协议；关闭 HTTP 客户端只结束会话，不停止外部服务。完整约定与测试入口见 [MCP 接入设计](docs/mcp接入设计.md)。
 
 ## 会话持久化设计
 
