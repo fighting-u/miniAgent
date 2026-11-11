@@ -36,23 +36,22 @@ def omit_none(value: Any) -> Any:
 class SessionStore:
     """创建、追加和加载单进程使用的会话 JSONL 文件。"""
 
-    def __init__(self, path: Path, ordinal: int = 0, turn_id: int = -1) -> None:
-        """保存文件路径、下一条序号和最近一次用户请求序号。"""
+    def __init__(self, path: Path, ordinal: int = 0, turn_id: int = -1, persisted: bool = True) -> None:
+        """保存文件路径、记录序号及文件是否已创建；加载已有会话时默认已落盘。"""
         self.path = path
         self.ordinal = ordinal
         self.turn_id = turn_id
+        # 新会话首次写入时独占创建文件，已有会话继续追加。
+        self.persisted = persisted
         # 尚未收到结果的工具调用；用于中断恢复，绝不自动重放工具。
         self.pending_calls: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def create(cls, root: Path = SESSION_DIR) -> "SessionStore":
-        """按本地创建日期和 UUIDv7 创建空文件，不覆盖已有会话。"""
+        """按本地创建日期和 UUIDv7 准备新会话，实际写入前不创建目录或文件。"""
         now = datetime.now().astimezone()
         path = root / now.strftime("%Y/%m/%d") / f"{uuid7()}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("x", encoding="utf-8"):
-            pass
-        return cls(path.resolve())
+        return cls(path.resolve(), persisted=False)
 
     @classmethod
     def list_sessions(cls, root: Path = SESSION_DIR) -> list[dict[str, Any]]:
@@ -173,10 +172,20 @@ class SessionStore:
             "turn_id": self.turn_id,
         }
         line = json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
-        with self.path.open("a", encoding="utf-8", newline="\n") as target:
-            target.write(line)
-            target.flush()
-            os.fsync(target.fileno())
+        try:
+            if not self.persisted:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+            # 首次写入独占创建，避免覆盖同名文件；恢复的空文件也按已有会话追加。
+            with self.path.open("a" if self.persisted else "x", encoding="utf-8", newline="\n") as target:
+                target.write(line)
+                target.flush()
+                os.fsync(target.fileno())
+        except OSError:
+            logger.exception("会话记录写入失败：%s", self.path)
+            raise
+        if not self.persisted:
+            self.persisted = True
+            logger.info("首次用户输入已保存，创建会话文件：%s", self.path)
         self.ordinal += 1
         self._track_call(payload)
 
@@ -212,4 +221,7 @@ def activate_session(session: SessionStore, history: list[Any], ui: TerminalUI, 
     ui.show_session(history, title)
     if interrupted_results:
         print("检测到上次中断的工具调用，已记录结果未确认，不自动重新执行。")
-    logger.info("当前会话文件：%s", session.path)
+    if session.persisted:
+        logger.info("当前会话文件：%s", session.path)
+    else:
+        logger.info("已切换到新会话，等待首次用户输入后创建文件：%s", session.path)

@@ -128,9 +128,10 @@ class MCPClient:
                     if ready.done() or attempt == attempts:
                         raise
                     logger.warning("MCP HTTP 服务器 %s 首次连接失败（%d/%d），准备重试：%s",
-                                   name, attempt, attempts, error)
+                                   name, attempt, attempts, error, exc_info=True)
         except Exception as error:
-            logger.warning("MCP 服务器 %s 连接或运行失败：%s", name, error)
+            # 保留完整堆栈及 TaskGroup 的子异常，避免只有异常组摘要而无法定位原因。
+            logger.warning("MCP 服务器 %s 连接或运行失败：%s", name, error, exc_info=True)
             print(f"MCP 服务器 {name} 不可用：{error}")
         finally:
             if not ready.done():
