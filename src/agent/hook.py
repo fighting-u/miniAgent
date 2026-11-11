@@ -2,7 +2,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from src.tools.tools import WORKDIR
+from src.tools.tools import WORKDIR, is_allowed_path
 
 
 # 当前模块使用的日志记录器。
@@ -67,8 +67,8 @@ def contains_destructive_command(command: str) -> bool:
 PERMISSION_RULES = [
     {
         "tools": ["read_file", "write_file", "edit_file"],
-        "check": lambda args: not (WORKDIR / str(args.get("path", ""))).resolve().is_relative_to(WORKDIR),
-        "message": "访问工作区外的文件",
+        "check": lambda args: not is_allowed_path((WORKDIR / str(args.get("path", ""))).resolve()),
+        "message": "访问允许的目录之外的文件",
     },
     {
         "tools": ["powershell"],
@@ -183,7 +183,7 @@ def summary_hook(messages: list[Any]) -> None:
 # 注册当前已有的 Hook 扩展逻辑，注册顺序就是同一事件的执行顺序。
 register_hook("PreUserPromptSubmit", workdir_log_hook)
 register_hook("PreToolUse", tool_request_log_hook)
-# register_hook("PreToolUse", permission_hook)
+register_hook("PreToolUse", permission_hook)
 register_hook("PostToolUse", tool_output_log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)

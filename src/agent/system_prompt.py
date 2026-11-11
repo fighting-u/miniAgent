@@ -1,6 +1,6 @@
 from src.memory.memory import memory_catalog
 from src.tools.skill import SKILL_LOADER
-from src.tools.tools import WORKDIR
+from src.tools.tools import EXTRA_ALLOWED_DIRS, WORKDIR
 
 
 def build_system_prompt(relevant_memories: str = "") -> str:
@@ -12,6 +12,7 @@ def build_system_prompt(relevant_memories: str = "") -> str:
     )
     return (
         f"你是一个运行在 Windows 环境，命令行工具为PowerShell的智能体。当前工作目录为 {WORKDIR}。\n"
+        f"文件工具额外允许访问以下目录及其子目录：{'、'.join(str(path) for path in EXTRA_ALLOWED_DIRS)}。相对路径仍以当前工作目录为基准。\n"
         "三步以上的复杂任务或者一次提出多个任务时，建议使用 update_plan 工具先创建计划。\n\n"
         f"可用技能：\n{SKILL_LOADER.catalog()}\n\n"
         "当某项技能适用于当前任务时，先使用 load_skill 工具读取它的完整说明，再按照说明执行。\n"

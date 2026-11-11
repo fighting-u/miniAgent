@@ -21,6 +21,9 @@ POWERSHELL_TIMEOUT_SECONDS = 120
 # 文件工具允许访问的工作区根目录，使用程序启动时的当前目录。
 WORKDIR = Path.cwd().resolve()
 
+# 除当前工作区外，文件工具额外允许访问的目录及其子目录。
+EXTRA_ALLOWED_DIRS = (Path(r"D:\projects\others\interview_post_crawl\面经").resolve(),)
+
 # 提供给模型的工具定义；parameters 使用 JSON Schema 描述模型可传入的参数。
 TOOLS = [
     {
@@ -188,13 +191,19 @@ def run_powershell(command: str) -> str:
         return f"无法启动 PowerShell：{error}"
 
 
+def is_allowed_path(path: Path) -> bool:
+    """检查解析后的路径是否属于当前工作区或额外允许目录。"""
+    return any(path.is_relative_to(root) for root in (WORKDIR, *EXTRA_ALLOWED_DIRS))
+
+
 def safe_path(path: str) -> Path:
-    """将相对路径解析到工作区内，并阻止访问工作区之外的路径。"""
+    """将相对路径解析到工作区，阻止访问所有允许目录之外的路径。"""
     # 这里的 / 是 pathlib.Path 重载的路径拼接运算符，不是简单的字符串拼接。
     # 当右侧是完整的绝对路径时，会直接采用右侧路径，舍弃左侧的 WORKDIR
     resolved_path = (WORKDIR / path).resolve()
-    if not resolved_path.is_relative_to(WORKDIR):
-        raise ValueError(f"Path escapes workspace: {path}")
+    if not is_allowed_path(resolved_path):
+        logger.warning("文件路径不在允许范围内，拒绝访问：%s", resolved_path)
+        raise ValueError(f"路径不在允许的工作区或额外目录内：{path}")
     return resolved_path
 
 
@@ -239,7 +248,7 @@ def run_glob(pattern: str) -> str:
 
     try:
         matches = sorted(
-            {match for match in glob_module.glob(pattern, root_dir=WORKDIR, recursive=True) if (WORKDIR / match).resolve().is_relative_to(WORKDIR)}
+            {match for match in glob_module.glob(pattern, root_dir=WORKDIR, recursive=True) if is_allowed_path((WORKDIR / match).resolve())}
         )
         shown = matches[:200]
         if len(matches) > 200:
