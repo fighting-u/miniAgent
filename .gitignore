@@ -11,3 +11,5 @@ docs/记录.md
 docs/imgs/记录/*
 
 .memory/
+
+tests/test.json

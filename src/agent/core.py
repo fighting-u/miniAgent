@@ -23,7 +23,7 @@ from src.tools.tools import PLAN, TOOL_HANDLERS, TOOLS, initialize_tools
 logger = logging.getLogger(__name__)
 
 # 连续多少轮未更新计划后，向模型追加一次规划提醒。
-PLAN_REMINDER_INTERVAL = 3
+PLAN_REMINDER_INTERVAL = 5
 
 # 单次模型请求因上下文过长而进行响应式压缩的最大重试次数。
 MAX_REACTIVE_COMPACT_RETRIES = 1
@@ -135,7 +135,7 @@ async def agent_loop(
         if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
             reminder = {
                 "role": "system",
-                "content": f"<reminder>请先检查并使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}</reminder>",
+                "content": f"系统提醒：当前已连续{PLAN_REMINDER_INTERVAL}轮没使用或更新任务计划，如果任务复杂或步骤多请使用 update_plan 更新任务计划。\n当前计划：\n{PLAN.render()}",
             }
             session.append(reminder)
             results.append(reminder)
