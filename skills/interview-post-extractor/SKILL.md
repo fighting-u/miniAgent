@@ -18,9 +18,10 @@ description: Retrieve and summarize interview-experience posts through the inter
 
 5. 调用系统工具写入相应markdown文件，要求：
    - 在 MCP 返回的保存目录下，以 Markdown 一级标题作为文件名，添加 `.md` 后缀；最终相对路径形如 `面经/年/月/日/<标题>.md`。
-   - 标题名看下面的示例说明；
+   - 标题名看下面的示例说明，如"字节跳动-抖音-一面.md"；
    - 同名文件已经存在时追加序号，如已有name.md则用name-2.md，避免覆盖。
-   - 多份面经分别命名，保存到同一个返回目录
+   - 多份面经分别命名，保存到同一个返回目录；
+   - 生成模型是指调用的llm的名称，如gpt-6.1-sol，通过系统工具如get_model_name()获取，没有就凭训练记忆填自己是什么模型
 
 ## Markdown 格式
 
@@ -33,7 +34,7 @@ description: Retrieve and summarize interview-experience posts through the inter
 url: ...
 发布时间: ...（指的是帖子发布时间，没有就忽略）
 抓取时间: ...
-生成模型：...（使用系统工具获取，没有就凭你自己的印象填自己是什么模型）
+生成模型：...
 
 题目如下：
 ## 项目相关
