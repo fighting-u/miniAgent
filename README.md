@@ -1,6 +1,8 @@
 # MiniAgent
 这是一个学习项目，从零搭建1个agent。模仿codex，claude code，openclaw为主，主要学的是思想，harness工程。
 
+核心代码在`src\agent\core.py`内。
+
 ## 项目结构
 
 ```text
@@ -30,6 +32,7 @@ miniAgent/
 │   └── code-review/
 │       └── SKILL.md            # 代码审查技能的元数据和完整说明
 ├── docs/                       # 项目设计与学习记录文档
+│   ├── 基础工具设计.md          # 内置工具、工作区路径与权限管控
 │   ├── 持久化设计.md            # 会话 JSONL 持久化格式与事件顺序设计
 │   ├── 终端运行界面设计.md      # 自动恢复、命令菜单和历史展示约定
 │   ├── 记忆压缩设计.md          # 上下文压缩流程、归档和恢复限制

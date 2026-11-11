@@ -1,6 +1,8 @@
 import ast
 import json
+import logging
 import os
+from datetime import datetime
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -10,6 +12,8 @@ from src.memory.memory import load_memory
 from src.tools.mcp_client import MCPClient
 from src.tools.skill import SKILL_LOADER
 
+# 当前模块使用的日志记录器。
+logger = logging.getLogger(__name__)
 
 # PowerShell 单次执行的最长时间，单位为秒。
 POWERSHELL_TIMEOUT_SECONDS = 120
@@ -79,11 +83,7 @@ TOOLS = [
                         "type": "object",
                         "properties": {
                             "content": {"type": "string", "description": "计划项内容。"},
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed"],
-                                "description": "计划项状态。",
-                            },
+                            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"], "description": "计划项状态。"},
                         },
                         "required": ["content", "status"],
                         "additionalProperties": False,
@@ -126,7 +126,35 @@ TOOLS = [
         "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         "strict": True,
     },
+    {
+        "type": "function",
+        "name": "get_model_name",
+        "description": "获取当前请求配置的模型名称，读取环境变量 MODEL。",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "get_current_time",
+        "description": "获取系统本地当前时间，以带时区偏移的 ISO 8601 格式返回，精确到秒，例如 2026-11-11T15:30:45+08:00。",
+        "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        "strict": True,
+    },
 ]
+
+
+def run_get_model_name() -> str:
+    """读取与当前模型请求相同的 MODEL 环境变量，返回配置的模型名称。"""
+    model_name = os.getenv("MODEL", "")
+    if not model_name.strip():
+        logger.warning("获取模型名称失败：环境变量 MODEL 未配置或为空")
+        return "错误：环境变量 MODEL 未配置或为空。"
+    return model_name
+
+
+def run_get_current_time() -> str:
+    """返回系统本地当前时间，使用带时区偏移的 ISO 8601 格式，精确到秒。"""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 # 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
@@ -162,6 +190,8 @@ def run_powershell(command: str) -> str:
 
 def safe_path(path: str) -> Path:
     """将相对路径解析到工作区内，并阻止访问工作区之外的路径。"""
+    # 这里的 / 是 pathlib.Path 重载的路径拼接运算符，不是简单的字符串拼接。
+    # 当右侧是完整的绝对路径时，会直接采用右侧路径，舍弃左侧的 WORKDIR
     resolved_path = (WORKDIR / path).resolve()
     if not resolved_path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {path}")
@@ -209,11 +239,7 @@ def run_glob(pattern: str) -> str:
 
     try:
         matches = sorted(
-            {
-                match
-                for match in glob_module.glob(pattern, root_dir=WORKDIR, recursive=True)
-                if (WORKDIR / match).resolve().is_relative_to(WORKDIR)
-            }
+            {match for match in glob_module.glob(pattern, root_dir=WORKDIR, recursive=True) if (WORKDIR / match).resolve().is_relative_to(WORKDIR)}
         )
         shown = matches[:200]
         if len(matches) > 200:
@@ -275,11 +301,7 @@ class PlanManager:
 
         lines = []
         for item in self.items:
-            marker = {
-                "pending": "[ ]",
-                "in_progress": "[>]",
-                "completed": "[x]",
-            }[item["status"]]
+            marker = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}[item["status"]]
             lines.append(f"{marker} {item['content']}")
 
         completed_count = sum(item["status"] == "completed" for item in self.items)
@@ -303,6 +325,8 @@ def run_update_plan(plan: list[Any] | str) -> str:
 
 # 工具名称到具体处理函数的分发表。
 TOOL_HANDLERS = {
+    "get_model_name": run_get_model_name,
+    "get_current_time": run_get_current_time,
     "powershell": run_powershell,
     "read_file": run_read,
     "write_file": run_write,
