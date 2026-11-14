@@ -8,7 +8,18 @@
 ```text
 miniAgent/
 ├── src/                        # Python 源码包，各子目录通过 __init__.py 标记为包
-│   ├── __main__.py             # python -m src 启动入口
+│   ├── __main__.py             # python -m src 常驻程序启动入口
+│   ├── server.py               # 共享资源初始化、通道启动与服务收尾
+│   ├── terminal.py             # python -m src.terminal 独立终端客户端
+│   ├── channels/               # 通道协议适配
+│   │   ├── base.py             # 统一输入、通道基类和 Dispatcher
+│   │   ├── manager.py          # 配置读取、类型注册与实例生命周期
+│   │   ├── terminal.py         # 常驻端 WebSocket 监听与回复发送
+│   │   └── qq.py               # QQ 通道占位，默认禁用
+│   ├── runtime/                # 常驻运行协调
+│   │   ├── runtime.py          # 输入队列、单消费者、会话锁和事件持久化
+│   │   ├── runner.py           # Agent 执行边界，预留执行池扩展
+│   │   └── permissions.py      # 审批等待和控制消息回传
 │   ├── agent/                  # Agent 主流程
 │   │   ├── core.py             # 对话循环、模型请求和工具调度
 │   │   ├── hook.py             # Hook 注册、权限检查和运行日志扩展
@@ -22,12 +33,13 @@ miniAgent/
 │   ├── context/                # 对话上下文压缩
 │   │   └── context_compactor.py # 工具结果落盘、历史裁剪和摘要
 │   ├── session/
-│   │   └── session_store.py    # 会话 JSONL 存储、恢复与激活
+│   │   └── session_store.py    # 会话 JSONL 存储与恢复
 │   ├── ui/
 │   │   └── terminal_ui.py      # 终端输入、菜单和历史展示
 │   └── common/
 │       └── logging_config.py   # 文件诊断日志配置
 ├── .mcp.json                   # MCP 服务器启动配置，默认不连接任何服务器
+├── .channels.yaml              # 通道实例配置、终端监听地址与输入队列容量
 ├── skills/                     # 本地技能目录
 │   └── code-review/
 │       └── SKILL.md            # 代码审查技能的元数据和完整说明
@@ -35,14 +47,18 @@ miniAgent/
 │   ├── 基础工具设计.md          # 内置工具、工作区路径与权限管控
 │   ├── 持久化设计.md            # 会话 JSONL 持久化格式与事件顺序设计
 │   ├── 终端运行界面设计.md      # 自动恢复、命令菜单和历史展示约定
+│   ├── 多通道设计.md            # 常驻程序、通道队列、事件分发与终端客户端改造方案
 │   ├── 记忆压缩设计.md          # 上下文压缩流程、归档和恢复限制
 │   ├── 长期记忆设计.md          # 稳定信息的提取、存储和按需召回
 │   ├── mcp接入设计.md           # MCP 接入准备与待实现范围
 │   └── 记录.md                  # 项目学习记录
 ├── tests/                      # 测试目录，子目录通过 __init__.py 支持递归发现
+│   ├── temp_workspace.py       # 继承工作区权限、自动清理的测试临时目录
 │   ├── unit/
+│   │   ├── test_channels.py    # WebSocket、终端客户端、队列和事件持久化测试
 │   │   └── test_sessions.py    # 本地 SDK、工具循环与加载恢复测试
 │   └── integration/
+│       ├── live_channels.py    # 独立终端、真实模型与工具、多次连接续聊测试
 │       ├── live_sessions.py    # 真实 API 跨进程断开续聊测试
 │       ├── live_mcp.py         # 真实 stdio MCP 与主 LLM 的工具调用测试
 │       └── live_mcp_http.py    # HTTP MCP 鉴权、工具调用及会话关闭测试
@@ -57,5 +73,13 @@ miniAgent/
 ## 开始
 
 ```powershell
+# 第一个终端：启动常驻程序。
 python -m src
+
+# 第二个终端：连接常驻程序并聊天。
+python -m src.terminal
 ```
+
+默认监听 `ws://127.0.0.1:8765`，在 `.channels.yaml` 中配置；客户端可用 `--url` 指定地址，常驻端可用 `--config` 指定配置文件。`/q` 只断开终端，常驻程序通过其所在终端的 Ctrl+C 停止。
+
+本地回归测试：`.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests/unit -v`。真实端到端测试：`.venv\Scripts\python.exe -B -X utf8 tests/integration/live_channels.py`，使用现有模型配置，成功或失败均清理本次临时文件和子进程。设计与验证边界见 [多通道设计](docs/多通道设计.md)。

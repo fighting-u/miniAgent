@@ -1,12 +1,12 @@
 import asyncio
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import httpx
 
 from live_mcp import PROJECT_ROOT, SERVER_SOURCE, run_test
+from tests.temp_workspace import temporary_workspace
 
 
 # 复用单工具服务；在子进程内绑定随机端口，避免固定端口冲突。
@@ -79,7 +79,7 @@ def main() -> None:
     """测试成功或失败均删除临时服务、配置、日志和会话文件。"""
     root = None
     try:
-        with tempfile.TemporaryDirectory(prefix="miniagent-mcp-http-", dir=PROJECT_ROOT / "tests") as directory:
+        with temporary_workspace("miniagent-mcp-http-") as directory:
             root = Path(directory)
             asyncio.run(run_http_test(root))
     finally:

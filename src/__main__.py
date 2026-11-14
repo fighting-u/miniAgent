@@ -1,9 +1,7 @@
-"""项目终端入口：在项目根目录执行 python -m src。"""
+"""常驻程序入口：终端客户端通过 python -m src.terminal 单独启动。"""
 
-import asyncio
-
-from src.agent.core import main
+from src.server import main
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

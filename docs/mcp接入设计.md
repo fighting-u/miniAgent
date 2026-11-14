@@ -61,7 +61,7 @@ Streamable HTTP：连接已启动的 MCP 服务，`headers` 可省略。
 | `.mcp.json` | 配置服务器启动参数或 HTTP 地址、请求头。 |
 | `src/tools/mcp_client.py` | 读取配置，管理连接，发现工具，维护路由并执行调用。 |
 | `src/tools/tools.py` | `initialize_tools` 等待发现完成，`assemble_tools` 合并本地与 MCP 工具。 |
-| `src/agent/core.py` | 后台启动初始化，主模型请求前等待工具就绪，分发调用并在退出时清理。 |
+| `src/server.py`、`src/runtime/runner.py`、`src/agent/core.py` | 常驻入口后台初始化 MCP 并负责关闭，Runner 传入共享连接；Agent 在主模型请求前等待工具就绪并分发调用。 |
 | `pyproject.toml` | 声明 MCP SDK 依赖。 |
 | `README.md` | 项目文件结构与配置说明。 |
 | `tests/integration/live_mcp.py` | 真实 stdio 服务与 LLM 单次工具调用测试。 |
@@ -77,3 +77,5 @@ Streamable HTTP：连接已启动的 MCP 服务，`headers` 可省略。
 测试启动临时 MCP 服务，复用实际 Agent 循环，验证工具发现、一次工具调用及最终回答。每项最多两次主模型请求，不调用辅助模型或触发压缩；成功或失败均清理临时进程和文件，保留测试脚本。
 
 2026-11-10 此前两项真实测试均通过（本次命名修正与连接重试改动未重新运行测试）。HTTP 额外验证了鉴权请求头、关闭会话的 DELETE，以及客户端关闭后外部服务仍在运行。远程 HTTPS、代理和 OAuth 未实测。
+
+2026-11-14 多通道改造后，stdio 和 HTTP 两项真实测试再次通过（各 2 次主模型请求），测试外层消费 Agent 事件并持久化，MCP 原始协议及路由保持不变。临时服务进程和文件均已清理；Windows stdio 子进程命名管道验证在解除沙箱管道限制后执行。

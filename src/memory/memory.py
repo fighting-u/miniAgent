@@ -321,7 +321,7 @@ async def extract_memories(client: AsyncOpenAI, messages: list[Any]) -> int:
             stored += 1
 
         if stored:
-            print(f"\n\033[33m[记忆：已存储 {stored} 条记录]\033[0m")
+            logger.info("记忆：已存储 %d 条记录", stored)
         return stored
     except Exception as error:
         logger.warning("长期记忆提取已跳过：%s", error)

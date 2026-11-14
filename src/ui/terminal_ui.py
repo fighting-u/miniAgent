@@ -16,7 +16,7 @@ from prompt_toolkit.styles import Style
 
 
 # 输入框支持的斜杠命令及中文补全说明。
-COMMANDS = {"/new": "开启新对话", "/resume": "选择历史会话", "/delete": "选择并删除会话", "/q": "退出程序"}
+COMMANDS = {"/new": "开启新对话", "/resume": "选择历史会话", "/delete": "选择并删除会话", "/q": "断开终端"}
 
 # 终端输入、菜单和角色标题的轻量配色。
 UI_STYLE = Style.from_dict({
@@ -111,14 +111,14 @@ def menu_bindings(ignore_blank: bool = False) -> KeyBindings:
 class TerminalUI:
     """负责终端输入、会话选择以及历史内容展示，不参与模型或存储逻辑。"""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, workdir: str | None = None) -> None:
         """配置单行输入框、占位文字、斜杠菜单和底部提示。"""
         self.prompt = PromptSession(
             message=[("class:prompt", "› ")],
             placeholder=[("class:placeholder", "输入问题，或输入 / 查看命令")],
             completer=CommandCompleter(), complete_while_typing=True,
             key_bindings=menu_bindings(ignore_blank=True), style=UI_STYLE, reserve_space_for_menu=len(COMMANDS),
-            bottom_toolbar=f"{model_name} · {Path.cwd()}\n/new 新对话   /resume 历史会话   /delete 删除会话   /q 退出",
+            bottom_toolbar=f"{model_name} · {workdir or Path.cwd()}\n/new 新对话   /resume 历史会话   /delete 删除会话   /q 断开终端",
         )
 
     async def read_input(self) -> str:
@@ -127,7 +127,7 @@ class TerminalUI:
         with patch_stdout():
             return (await self.prompt.prompt_async()).strip()
 
-    async def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> Path | None:
+    async def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> str | None:
         """复用同一个会话选择列表，供恢复或删除使用，取消时不改变当前会话。"""
         if not sessions:
             print("暂无可选择的会话。")
@@ -152,7 +152,7 @@ class TerminalUI:
             if not choice:
                 return None
             if choice.isdecimal() and 1 <= int(choice) <= len(sessions):
-                return sessions[int(choice) - 1]["path"]
+                return sessions[int(choice) - 1]["id"]
             print("请输入列表内的有效序号，或按 Ctrl+C 取消。")
 
     async def confirm_delete(self, session_info: dict[str, Any], is_current: bool) -> bool:
@@ -182,6 +182,17 @@ class TerminalUI:
             self.show_items(history)
         else:
             print("还没有聊天记录，输入问题开始对话。\n")
+
+    async def confirm_permission(self, event: dict[str, Any]) -> bool:
+        """在客户端确认敏感工具操作，决定通过控制消息回传。"""
+        print(f"需要权限审批：{event['reason']}\n工具：{event['name']}({event['arguments']})")
+        confirmation = PromptSession(style=UI_STYLE)
+        try:
+            with patch_stdout():
+                answer = (await confirmation.prompt_async("是否允许？[y/N] ")).strip().casefold()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in {"y", "yes"}
 
     @staticmethod
     def show_items(items: list[Any]) -> None:

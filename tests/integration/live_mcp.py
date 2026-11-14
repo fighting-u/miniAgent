@@ -3,9 +3,8 @@ import ctypes
 import json
 import os
 import sys
-import tempfile
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, aclosing
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -17,6 +16,8 @@ from openai import AsyncOpenAI
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(PROJECT_ROOT))
+
+from tests.temp_workspace import temporary_workspace
 
 from src.agent import core
 from src.context.context_compactor import ContextCompactor
@@ -72,7 +73,6 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
     kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
     kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-    background = []
     try:
         definitions = await ready
         name = "mcp__smoke__reveal_token"
@@ -104,18 +104,19 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
                 return messages
 
             with ExitStack() as patches:
-                # 无控制台的测试进程不渲染终端；调用、持久化和结果校验仍走真实逻辑。
-                patches.enter_context(patch.object(core.TerminalUI, "show_items"))
+                # Agent 只产生事件；测试作为外层消费者记录原始消息，无需终端界面。
                 patches.enter_context(patch.object(core, "load_memories", new=AsyncMock(return_value="")))
-                patches.enter_context(patch.object(core, "extract_memories", new=AsyncMock(return_value=0)))
                 patches.enter_context(patch.object(core, "build_system_prompt", return_value="按用户要求调用工具并简短回答。"))
                 patches.enter_context(patch.object(ContextCompactor, "prepare", side_effect=keep_history))
                 for method in ("compact_history", "reactive_compact", "summarize_history"):
                     patches.enter_context(patch.object(ContextCompactor, method,
                         new=AsyncMock(side_effect=AssertionError("测试禁止调用压缩或摘要"))))
                 patches.enter_context(patch.object(client.responses, "create", side_effect=limited_create))
-                await core.agent_loop(client, messages, question, session, background, mcp, ready)
-                await asyncio.gather(*background)
+                async with aclosing(core.agent_loop(client, messages, question, mcp, ready)) as events:
+                    async for event in events:
+                        if event["type"] == "items":
+                            for item in event["items"]:
+                                session.append(item, model_name=event.get("model_name"))
             assert requests == 2, "主模型请求次数错误"
         calls = [item for item in messages if getattr(item, "type", None) == "function_call"]
         outputs = [item for item in messages if isinstance(item, dict) and item.get("type") == "function_call_output"]
@@ -127,7 +128,6 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
         print("真实链路通过：MCP 连接、发现、组装、主 LLM 调用、工具结果配对及最终回答；2 次主模型请求。")
     finally:
         try:
-            await asyncio.gather(*background, return_exceptions=True)
             await mcp.close(ready)
         finally:
             if handle:
@@ -145,7 +145,7 @@ def main() -> None:
     """成功或失败均通过临时目录上下文清理服务源码、配置、口令和会话文件。"""
     root = None
     try:
-        with tempfile.TemporaryDirectory(prefix="miniagent-mcp-", dir=PROJECT_ROOT / "tests") as directory:
+        with temporary_workspace("miniagent-mcp-") as directory:
             root = Path(directory)
             asyncio.run(run_test(root))
     finally:

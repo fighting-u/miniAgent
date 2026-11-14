@@ -15,4 +15,6 @@ dependencies = [
     "pyyaml>=6.0",
     # 为会话标识生成带时间顺序的 UUIDv7。
     "uuid6>=2025.0.1",
+    # 为常驻程序和独立终端客户端提供异步 WebSocket 通信。
+    "websockets>=16.0,<17",
 ]

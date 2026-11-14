@@ -99,41 +99,7 @@ def check_rules(tool_name: str, tool_input: dict[str, Any]) -> str | None:
     return None
 
 
-def ask_user(tool_name: str, tool_input: dict[str, Any], reason: str) -> str:
-    """向用户展示敏感操作信息，并请求明确批准或拒绝。"""
-    logger.warning("需要权限审批：%s", reason)
-    print(f"   Tool: {tool_name}({tool_input})")
-    choice = input("   是否允许? [y/N] ").strip().lower()
-    decision = "allow" if choice in ("y", "yes") else "deny"
-    logger.info("工具 %s 的权限审批结果：%s", tool_name, decision)
-    return decision
-
-
-def check_permission(tool_name: str, tool_input: dict[str, Any]) -> bool:
-    """依次经过硬拒绝、敏感操作识别和用户审批三道权限闸门。"""
-    # 闸门 1：命中高危规则时直接拒绝。
-    if tool_name == "powershell":
-        reason = check_deny_list(str(tool_input.get("command", "")))
-        if reason:
-            logger.warning("PowerShell 命令被硬拒绝规则拦截：%s", reason)
-            return False
-
-    # 闸门 2 和 3：识别敏感操作，并交给用户审批。
-    reason = check_rules(tool_name, tool_input)
-    if reason:
-        decision = ask_user(tool_name, tool_input, reason)
-        if decision == "deny":
-            return False
-
-    return True
-
-
-def permission_hook(tool_call: Any, arguments: dict[str, Any]) -> str | None:
-    """将现有权限审查接入工具执行前 Hook，拒绝时返回给模型的中文反馈。"""
-    if not check_permission(tool_call.name, arguments):
-        return "权限被拒绝。"
-    return None
-
+# 权限闸门保留以上规则；交互审批由 Agent 事件和 Runtime 审批代理完成。
 
 def workdir_log_hook() -> None:
     """在读取用户输入前输出当前工作目录。"""
@@ -183,7 +149,6 @@ def summary_hook(messages: list[Any]) -> None:
 # 注册当前已有的 Hook 扩展逻辑，注册顺序就是同一事件的执行顺序。
 register_hook("PreUserPromptSubmit", workdir_log_hook)
 register_hook("PreToolUse", tool_request_log_hook)
-register_hook("PreToolUse", permission_hook)
 register_hook("PostToolUse", tool_output_log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("Stop", summary_hook)

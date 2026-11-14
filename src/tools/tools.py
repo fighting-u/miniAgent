@@ -318,17 +318,14 @@ class PlanManager:
         return "\n".join(lines)
 
 
-# 当前 Agent 任务共享的计划管理器。
-PLAN = PlanManager()
-
-
-def run_update_plan(plan: list[Any] | str) -> str:
-    """执行计划更新工具，并在终端中展示更新后的计划。"""
+# 当前 Agent 任务的计划管理器由会话持有，并在工具调用时显式传入。
+def run_update_plan(plan: list[Any] | str, *, manager: PlanManager) -> str:
+    """更新当前会话计划，展示由工具结果事件交给通道完成。"""
     try:
-        output = PLAN.update(plan)
+        output = manager.update(plan)
     except ValueError as error:
         return f"错误：{error}"
-    print(f"\n\033[33m## 当前计划\033[0m\n{output}")
+    logger.info("当前会话计划已更新")
     return output
 
 
