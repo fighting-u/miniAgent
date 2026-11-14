@@ -13,6 +13,8 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    # QQ 官方机器人 SDK，用于连接开放平台并收发 QQ 好友私聊（C2C）消息。
+    "qq-botpy>=1.2.1,<2",
     # 为会话标识生成带时间顺序的 UUIDv7。
     "uuid6>=2025.0.1",
     # 为常驻程序和独立终端客户端提供异步 WebSocket 通信。

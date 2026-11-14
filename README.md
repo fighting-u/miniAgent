@@ -15,7 +15,7 @@ miniAgent/
 │   │   ├── base.py             # 统一输入、通道基类和 Dispatcher
 │   │   ├── manager.py          # 配置读取、类型注册与实例生命周期
 │   │   ├── terminal.py         # 常驻端 WebSocket 监听与回复发送
-│   │   └── qq.py               # QQ 通道占位，默认禁用
+│   │   └── qq.py               # QQ 官方鉴权、网关心跳与好友私聊收发
 │   ├── runtime/                # 常驻运行协调
 │   │   ├── runtime.py          # 输入队列、单消费者、会话锁和事件持久化
 │   │   ├── runner.py           # Agent 执行边界，预留执行池扩展
@@ -56,9 +56,11 @@ miniAgent/
 │   ├── temp_workspace.py       # 继承工作区权限、自动清理的测试临时目录
 │   ├── unit/
 │   │   ├── test_channels.py    # WebSocket、终端客户端、队列和事件持久化测试
+│   │   ├── test_qq.py          # QQ 网关握手、心跳、私聊路由和资源清理测试
 │   │   └── test_sessions.py    # 本地 SDK、工具循环与加载恢复测试
 │   └── integration/
 │       ├── live_channels.py    # 独立终端、真实模型与工具、多次连接续聊测试
+│       ├── live_qq.py          # QQ 官方鉴权、网关 READY 和心跳测试，不发送消息
 │       ├── live_sessions.py    # 真实 API 跨进程断开续聊测试
 │       ├── live_mcp.py         # 真实 stdio MCP 与主 LLM 的工具调用测试
 │       └── live_mcp_http.py    # HTTP MCP 鉴权、工具调用及会话关闭测试
@@ -81,5 +83,9 @@ python -m src.terminal
 ```
 
 默认监听 `ws://127.0.0.1:8765`，在 `.channels.yaml` 中配置；客户端可用 `--url` 指定地址，常驻端可用 `--config` 指定配置文件。`/q` 只断开终端，常驻程序通过其所在终端的 Ctrl+C 停止。
+
+QQ 好友私聊通道也由同一个常驻程序启动，在本地 `.env` 配置 `QQ_APP_ID` 和 `QQ_APP_SECRET`；`.channels.yaml` 只保存环境变量名，不保存密钥。不使用 QQ 时将 `qq_main.enabled` 设为 `false`。QQ 使用共享当前会话，支持普通文本、`/new`、`/resume` 等命令；工具过程不逐条发送，助手回答在本轮结束后合并回复。审批用消息中的 `/approve <审批ID> allow|deny` 答复。
+
+只验证 QQ 连接：`.venv\Scripts\python.exe -B -X utf8 tests/integration/live_qq.py`。测试读取本地配置，确认鉴权、网关 READY 与心跳 ACK，成功或失败都会关闭连接并删除临时日志；不调用模型或发送 QQ 消息。
 
 本地回归测试：`.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests/unit -v`。真实端到端测试：`.venv\Scripts\python.exe -B -X utf8 tests/integration/live_channels.py`，使用现有模型配置，成功或失败均清理本次临时文件和子进程。设计与验证边界见 [多通道设计](docs/多通道设计.md)。

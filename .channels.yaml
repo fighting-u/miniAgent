@@ -12,5 +12,10 @@ channels:
       port: 8765
   - id: qq_main
     type: qq
-    # QQ 目前为占位类，后续实现协议后再启用。
-    enabled: false
+    # QQ 好友私聊；凭据从本地 .env 读取，不写入通道配置。
+    enabled: true
+    options:
+      app_id_env: QQ_APP_ID
+      secret_env: QQ_APP_SECRET
+      # 好友私聊默认使用正式 API，测试成员在 QQ 平台后台配置。
+      is_sandbox: false
