@@ -1,0 +1,44 @@
+# model相关配置
+# 模型密钥仍从本地 .env 中的 api_key_env 变量读取（当前使用 Qwen）。
+# 主模型、记忆辅助模型与压缩模型共用的名称。
+model: qwen3.7-flash
+# OpenAI 兼容服务地址，null 表示使用 SDK 默认值。
+base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
+# 模型密钥的环境变量名；密钥值保留在本地 .env。
+api_key_env: DASHSCOPE_API_KEY
+
+
+# 工具权限相关配置
+# 文件工具与 PowerShell 的工作区，相对本配置文件解析。
+workdir: .
+# PowerShell 单次执行的最长秒数。
+powershell_timeout: 120
+# 文件工具额外允许访问的目录及其子目录，不限制任意 PowerShell 命令。
+extra_allowed_dirs:
+- D:/projects/others/interview_post_crawl/面经
+
+# AgentRuntime接收InboundMessage的队列配置
+queue_size: 10
+
+# 通道channel相关配置
+# id 标识每个实例，type 表示tunnel类型，enabled 控制启动。
+channels:
+- id: terminal_main
+  type: terminal
+  enabled: true
+  options:
+    host: 127.0.0.1
+    port: 8765
+- id: qq_bot1
+  type: qq
+  enabled: true
+  options:
+    app_id_env: QQ_APP_ID
+    secret_env: QQ_APP_SECRET
+    is_sandbox: false
+    
+# MCP 服务器定义；支持 stdio 与 Streamable HTTP。
+mcp_servers:
+  interview_post_crawl:
+    type: http
+    url: http://localhost:8000/mcp
