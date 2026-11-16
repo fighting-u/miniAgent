@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -8,16 +9,13 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from src.ui.terminal_ui import TerminalUI
-
-
-# 客户端默认连接本机常驻程序，可通过 --url 覆盖。
-DEFAULT_URL = "ws://127.0.0.1:8765"
+from src.config import Config, DEFAULT_CONFIG_PATH
 
 
 class TerminalClient:
     """通过 WebSocket 对话，仅持有会话标识和本地界面。"""
 
-    def __init__(self, url: str = DEFAULT_URL, ui: TerminalUI | None = None) -> None:
+    def __init__(self, url: str, ui: TerminalUI | None = None) -> None:
         """允许测试注入界面；正常启动时等待服务端返回模型信息后创建。"""
         self.url = url
         self.ui = ui
@@ -88,10 +86,12 @@ class TerminalClient:
 def main() -> None:
     """解析终端连接地址，运行独立聊天客户端。"""
     parser = argparse.ArgumentParser(description="MiniAgent 终端客户端")
-    parser.add_argument("--url", default=DEFAULT_URL, help="常驻端 WebSocket 地址")
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="统一配置文件路径")
+    parser.add_argument("--url", help="覆盖配置中的常驻端 WebSocket 地址")
     args = parser.parse_args()
     try:
-        asyncio.run(TerminalClient(args.url).run())
+        config = Config.load(args.config)
+        asyncio.run(TerminalClient(args.url or config.terminal_url).run())
     except (OSError, ConnectionClosed) as error:
         print(f"无法继续连接常驻程序：{error}")
     except KeyboardInterrupt:

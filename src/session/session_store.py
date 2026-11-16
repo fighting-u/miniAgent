@@ -8,12 +8,12 @@ from typing import Any
 from uuid6 import uuid7
 
 
+# 会话 JSONL 目录名，由调用方与根目录拼接后传入。
+SESSION_DIR_NAME = "sessions"
+
 
 # 当前模块的会话存储日志记录器。
 logger = logging.getLogger(__name__)
-
-# 会话文件保存到项目根目录，不受启动命令的当前目录影响。
-SESSION_DIR = Path(__file__).resolve().parents[2] / "sessions"
 
 # 当前持久化记录对应的 LLM API 协议格式。
 API_FORMAT = "openai_responses"
@@ -45,14 +45,14 @@ class SessionStore:
         self.pending_calls: dict[str, dict[str, Any]] = {}
 
     @classmethod
-    def create(cls, root: Path = SESSION_DIR) -> "SessionStore":
+    def create(cls, root: Path) -> "SessionStore":
         """按本地创建日期和 UUIDv7 准备新会话，实际写入前不创建目录或文件。"""
         now = datetime.now().astimezone()
         path = root / now.strftime("%Y/%m/%d") / f"{uuid7()}.jsonl"
         return cls(path.resolve(), persisted=False)
 
     @classmethod
-    def list_sessions(cls, root: Path = SESSION_DIR) -> list[dict[str, Any]]:
+    def list_sessions(cls, root: Path) -> list[dict[str, Any]]:
         """按最近写入时间列出会话，仅读取首条用户问题作为列表预览。"""
         sessions = []
         for path in root.glob("*/*/*/*.jsonl"):
@@ -79,7 +79,7 @@ class SessionStore:
         return sorted(sessions, key=lambda item: (item["updated_at"], item["path"].name), reverse=True)
 
     @classmethod
-    def delete(cls, path: str | Path, root: Path = SESSION_DIR) -> None:
+    def delete(cls, path: str | Path, root: Path) -> None:
         """删除已确认的单个会话文件，限制在会话日期目录内，不递归删除目录。"""
         target = Path(path).resolve()
         relative = target.relative_to(root.resolve())

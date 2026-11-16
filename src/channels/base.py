@@ -2,7 +2,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncIterator
 
 
 # 通道注册和输出分发使用的诊断日志。
@@ -20,18 +20,30 @@ class InboundMessage:
     input: str  # 普通问题或斜杠命令。
 
 
+@dataclass
+class ChannelDisconnected:
+    """通道连接断开通知，由 Runtime 处理该来源的待审批请求。"""
+
+    channel_id: str  # 断开连接所属的通道实例。
+    reply_target: str  # 已断开的连接或聊天目标。
+
+
 class Channel(ABC):
     """通道统一接口，不限定主动连接或被动监听。"""
 
-    def __init__(self, channel_id: str, queue: asyncio.Queue[InboundMessage], approvals: Any) -> None:
-        """保存实例标识、公共输入队列和审批答复入口。"""
+    def __init__(self, channel_id: str) -> None:
+        """保存实例标识及协议回调到异步迭代的接收缓冲。"""
         self.channel_id = channel_id
-        self.queue = queue
-        self.approvals = approvals
+        self._incoming: asyncio.Queue[InboundMessage | ChannelDisconnected] = asyncio.Queue()  # 只缓冲协议输入，不调度 Agent。
+
+    async def receive(self) -> AsyncIterator[InboundMessage | ChannelDisconnected]:
+        """持续产出协议消息与断线通知，由 ChannelManager 合并读取。"""
+        while True:
+            yield await self._incoming.get()
 
     @abstractmethod
-    async def start(self) -> None:
-        """启动协议连接或监听。"""
+    async def start(self) -> bool:
+        """启动协议连接或监听；成功返回 True，可跳过的连接失败返回 False。"""
 
     @abstractmethod
     async def send(self, reply_target: str, event: dict[str, Any]) -> None:
@@ -42,7 +54,7 @@ class Channel(ABC):
         """关闭连接并清理通道资源。"""
 
 
-class Dispatcher:
+class MessageDispatcher:
     """按通道实例标识查找发送实现。"""
 
     def __init__(self) -> None:

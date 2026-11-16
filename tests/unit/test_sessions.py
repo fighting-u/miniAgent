@@ -1,5 +1,4 @@
 import json
-import os
 import sys
 import unittest
 from contextlib import ExitStack, aclosing
@@ -19,7 +18,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tests.temp_workspace import temporary_workspace
 
-from src.agent import core, hook
+from src.config import Config
+from src.agent import core
 from src.tools import tools
 from src.context.context_compactor import ContextCompactor
 from src.session.session_store import API_FORMAT, SessionStore, omit_none
@@ -57,9 +57,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(temporary_workspace("miniagent-session-")))
         self.session = SessionStore.create(self.root / "sessions")
-        self.stack.enter_context(patch.dict(os.environ, {"MODEL": "session-test-model"}))
-        self.stack.enter_context(patch.object(tools, "WORKDIR", self.root))
-        self.stack.enter_context(patch.object(hook, "WORKDIR", self.root))
+        self.config = Config(model="session-test-model", workdir=self.root)
         self.stack.enter_context(patch.object(core, "load_memories", return_value=""))
         self.stack.enter_context(patch.object(core, "build_system_prompt", return_value="只进行简短测试。"))
         for name in ("write_transcript", "save_output", "summarize_history"):
@@ -96,7 +94,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_agent(self, client, history, request, session) -> None:
         """作为生成器的外层消费者持久化事件，验证 Agent 不再直接依赖存储。"""
-        async with aclosing(core.agent_loop(client, history, request)) as events:
+        async with aclosing(core.agent_loop(client, history, request, self.config)) as events:
             async for event in events:
                 if event["type"] == "items":
                     for item in event["items"]:
@@ -198,7 +196,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         ], [assistant_message("已恢复，可以继续。")]], requests)
         executed = []
 
-        def interrupted_read(path: str) -> str:
+        def interrupted_read(path: str, *, config) -> str:
             """在第二个工具调用时模拟异常中断。"""
             executed.append(path)
             if path == "second":
@@ -206,7 +204,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             return "首个结果"
 
         history = [self.session.start_turn("读取两个文件。")]
-        with patch.dict(core.TOOL_HANDLERS, {"read_file": interrupted_read}):
+        with patch.object(tools, "run_read", interrupted_read):
             with self.assertRaisesRegex(RuntimeError, "模拟工具执行中断"):
                 await self.run_agent(client, history, "读取两个文件。", session=self.session)
         self.assertEqual(self.records()[-1]["payload"]["call_id"], "done")

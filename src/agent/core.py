@@ -1,17 +1,18 @@
 import asyncio
 import json
 import logging
-import os
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
+from src.config import Config
+
 from src.context.context_compactor import ContextCompactor, is_context_length_error
 from src.agent.hook import check_deny_list, check_rules, trigger_hooks
 from src.memory.memory import load_memories
-from src.tools.mcp_client import MCPClient
+from src.tools.mcp_manager import MCPManager
 from src.agent.system_prompt import build_system_prompt
-from src.tools.tools import PlanManager, TOOL_HANDLERS, TOOLS
+from src.tools.tools import PlanManager, build_tool_handlers, TOOLS
 
 
 # 当前模块使用的日志记录器。
@@ -26,25 +27,27 @@ MAX_REACTIVE_COMPACT_RETRIES = 1
 
 async def agent_loop(
     client: AsyncOpenAI, messages: list[Any], active_request: str,
-    mcp: MCPClient | None = None, tools_ready: asyncio.Task | None = None,
+    config: Config,
+    mcp: MCPManager | None = None,
     plan: PlanManager | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """持续请求模型和执行工具，通过事件生成器交给外层持久化与分发。"""
     # 当前会话独立持有计划，避免不同入口切换会话时共用可变状态。
     plan = plan if plan is not None else PlanManager()
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
-    relevant_memories = await load_memories(client, messages)
-    instructions = build_system_prompt(relevant_memories)
-    # 辅助召回无需等待 MCP，主模型请求前必须取得完整工具列表。
-    available_tools = await tools_ready if tools_ready is not None else TOOLS
+    relevant_memories = await load_memories(client, messages, config)
+    instructions = build_system_prompt(config, relevant_memories)
+    handlers = build_tool_handlers(config, plan)
+    # MCPManager 已在启动阶段组装完整工具列表，核心循环不处理初始化任务。
+    available_tools = mcp.available_tools if mcp is not None else TOOLS
     # 记录连续多少轮工具调用没有使用计划工具。
     rounds_since_plan = 0
     # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
-    compactor = ContextCompactor(client, os.getenv("MODEL", ""))
+    compactor = ContextCompactor(client, config)
     # 记录当前模型请求已进行的响应式压缩重试次数。
     reactive_retries = 0
     # 固定本轮使用的模型名称，也用于持久化元信息。
-    model_name = os.getenv("MODEL", "")
+    model_name = config.model
     while True:
         # 每次请求模型前依次执行确定性裁剪，必要时再生成历史摘要。
         messages[:] = await compactor.prepare(messages, active_request)
@@ -101,7 +104,7 @@ async def agent_loop(
 
                 # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
                 denied = check_deny_list(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
-                reason = check_rules(tool_call.name, arguments) if denied is None else None
+                reason = check_rules(tool_call.name, arguments, config) if denied is None else None
                 if reason:
                     permission = {"type": "permission", "name": tool_call.name,
                                   "arguments": arguments, "reason": reason, "allowed": False}
@@ -124,9 +127,9 @@ async def agent_loop(
                 elif mcp is not None and tool_call.name in mcp.routes:
                     output = await mcp.call_tool(tool_call.name, arguments)
                 else:
-                    handler = TOOL_HANDLERS.get(tool_call.name)
+                    handler = handlers.get(tool_call.name)
                     if tool_call.name == "update_plan":
-                        output = str(handler(**arguments, manager=plan))
+                        output = str(handler(**arguments))
                     else:
                         # 同步工具移到工作线程，保持常驻端监听和审批收发可响应。
                         output = str(await asyncio.to_thread(handler, **arguments)) if handler else f"未知工具: {tool_call.name}"

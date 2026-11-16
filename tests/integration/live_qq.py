@@ -11,25 +11,22 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from dotenv import load_dotenv
-
-from src.channels.manager import ChannelManager, load_config
-from src.runtime.permissions import ApprovalBroker
-from src.channels.base import Dispatcher
+from src.config import Config
+from src.channels.base import MessageDispatcher
+from src.channels.manager import ChannelManager
 from tests.temp_workspace import temporary_workspace
 
 
 async def check_connection() -> None:
     """复用正式配置与通道管理器，成功或异常都关闭连接并删除临时日志。"""
-    load_dotenv(PROJECT_ROOT / ".env")
-    settings = load_config()
-    settings["channels"] = [item for item in settings["channels"]
+    config = Config.load()
+    config.channels = [item for item in config.channels
                             if item["type"] == "qq" and item.get("enabled", True)]
-    if not settings["channels"]:
-        raise ValueError("请先在 .channels.yaml 中启用 QQ 通道")
+    if not config.channels:
+        raise ValueError("请先在 config.yaml 中启用 QQ 通道")
     baseline = set(asyncio.all_tasks())
-    dispatcher = Dispatcher()
-    manager = ChannelManager(asyncio.Queue(), ApprovalBroker(dispatcher), dispatcher)
+    message_dispatcher = MessageDispatcher()
+    manager = ChannelManager(config, message_dispatcher)
     with temporary_workspace("miniagent-qq-") as root:
         # 日志只保存在本次临时目录，不输出请求头或原始平台响应。
         handler = logging.FileHandler(root / "connection.log", encoding="utf-8")
@@ -44,8 +41,10 @@ async def check_connection() -> None:
         root_logger.addHandler(progress)
         root_logger.setLevel(logging.INFO)
         try:
-            await manager.start(settings)
-            for channel in dispatcher.channels.values():
+            await manager.start()
+            if len(message_dispatcher.channels) != len(config.channels):
+                raise AssertionError("存在未连接成功的 QQ 通道，请检查日志")
+            for channel in message_dispatcher.channels.values():
                 await asyncio.wait_for(channel.heartbeat_ack.wait(), 20)
                 if not channel.connected or channel.task.done():
                     raise AssertionError("QQ 网关未保持连接")

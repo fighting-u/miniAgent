@@ -1,28 +1,27 @@
 import asyncio
 import json
 import unittest
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from websockets.asyncio.server import serve
 
-from src.channels.base import Dispatcher
+from src.channels.base import ChannelDisconnected, MessageDispatcher
 from src.channels.qq import QQChannel
 from src.runtime.permissions import ApprovalBroker
-from src.runtime.runner import Runner
-from src.runtime.runtime import Runtime
+from src.config import Config
+from src.runtime import runtime as runtime_module
+from src.runtime.runtime import AgentRuntime
 from tests.temp_workspace import temporary_workspace
 
 
-class ReplyRunner(Runner):
-    """用固定回答验证私聊到 Runtime 的往返，不请求真实模型。"""
-
-    async def run(self, messages, request, plan):
-        """产生与正式 Agent 相同的原始消息事件。"""
-        item = {"type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": f"收到：{request}"}]}
-        yield {"type": "items", "items": [item]}
-        messages.append(item)
+async def reply_agent(client, messages, request, config, mcp, plan):
+    """用固定回答替换 Agent，验证通道与运行时的事件往返。"""
+    item = {"type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": f"收到：{request}"}]}
+    yield {"type": "items", "items": [item]}
+    messages.append(item)
 
 
 class QQTests(unittest.IsolatedAsyncioTestCase):
@@ -30,10 +29,12 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         """建立模拟 QQ 网关；不读取凭据、不连接外网、不创建 SDK 日志文件。"""
-        self.dispatcher = Dispatcher()
-        self.broker = ApprovalBroker(self.dispatcher)
-        self.queue = asyncio.Queue(maxsize=2)
-        self.channel = QQChannel("qq_test", self.queue, self.broker, startup_timeout=1)
+        self.message_dispatcher = MessageDispatcher()
+        self.broker = ApprovalBroker(self.message_dispatcher)
+        self.inputs = []  # 记录通道提交的普通输入。
+        self.received = asyncio.Event()  # 等待模拟网关实际提交消息。
+        self.listener = None  # 模拟 Runtime 对通道输入流的读取任务。
+        self.channel = QQChannel("qq_test", startup_timeout=1)
         self.identify = None
         self.heartbeat_sequences = []  # 确认首次心跳使用 READY 的序号，而非鉴权前的空序号。
         self.socket = None
@@ -49,6 +50,17 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.login_patch.stop)
         self.addAsyncCleanup(self.close)
 
+    async def listen(self) -> None:
+        """模拟 Runtime 主动读取输入流，审批立即分发，其余输入供断言使用。"""
+        async for event in self.channel.receive():
+            if isinstance(event, ChannelDisconnected):
+                self.broker.disconnect(event.channel_id, event.reply_target)
+            elif event.input.startswith("/approve "):
+                self.broker.resolve(event)
+            else:
+                self.inputs.append(event)
+            self.received.set()
+
     async def login(self) -> None:
         """替换鉴权网络，保留真实网关读写与心跳实现。"""
         self.channel.http = self.http
@@ -56,6 +68,8 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
 
     async def close(self) -> None:
         """无论断言结果如何，关闭通道、WebSocket 监听和全部连接。"""
+        if self.listener is not None:
+            await self.cancel_task(self.listener)
         await self.channel.stop()
         self.server.close()
         await self.server.wait_closed()
@@ -74,14 +88,17 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
                 await socket.send(json.dumps({"op": 11, "d": None}))
 
     async def start(self) -> None:
-        """完成握手与心跳后把通道注册到正式 Dispatcher。"""
+        """完成握手与心跳后把通道注册到正式 MessageDispatcher。"""
         await self.channel.start()
         await asyncio.wait_for(self.channel.heartbeat_ack.wait(), 2)
-        self.dispatcher.channels[self.channel.channel_id] = self.channel
+        self.message_dispatcher.channels[self.channel.channel_id] = self.channel
+        self.listener = asyncio.create_task(self.listen())
 
     async def receive(self, msg_id: str, text: str) -> None:
-        """直接注入平台私聊载荷，稳定验证队列控制分支。"""
+        """直接注入平台私聊载荷，验证统一提交入口。"""
+        self.received.clear()
         await self.channel._receive({"id": msg_id, "content": text, "author": {"user_openid": "user-a"}})
+        await asyncio.wait_for(self.received.wait(), 2)
 
     async def test_gateway_and_final_reply(self) -> None:
         """验证真正握手、忽略群消息、私聊输入与最终回复的原始 msg_id 关联。"""
@@ -95,16 +112,17 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         await self.socket.send(json.dumps({"op": 0, "t": "C2C_MESSAGE_CREATE", "s": 3,
                                            "d": {"id": "private-1", "content": "你好",
                                                  "author": {"user_openid": "user-a"}}}))
-        message = await asyncio.wait_for(self.queue.get(), 2)
+        await asyncio.wait_for(self.received.wait(), 2)
+        message = self.inputs.pop(0)
         self.assertEqual((message.reply_target, message.input, message.session_id), ("user-a", "你好", ""))
-        self.assertTrue(self.queue.empty())
-        await self.dispatcher.send(message, {"type": "items", "items": [
+        self.assertFalse(self.inputs)
+        await self.message_dispatcher.send(message, {"type": "items", "items": [
             {"type": "message", "role": "user", "content": "你好"},
             {"type": "function_call", "name": "read_file"},
             {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "回答"}]},
         ]})
         self.api.post_c2c_message.assert_not_awaited()
-        await self.dispatcher.send(message, {"type": "done"})
+        await self.message_dispatcher.send(message, {"type": "done"})
         self.api.post_c2c_message.assert_awaited_once_with(openid="user-a", msg_type=0,
                                                          content="回答", msg_id="private-1", msg_seq=1)
         self.assertFalse(self.channel.replies)
@@ -113,11 +131,11 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.channel.task)
         self.http.close.assert_awaited_once()
 
-    async def test_approval_bypasses_full_queue(self) -> None:
-        """普通输入积压时审批仍可唤醒消费者，回复序号保持递增。"""
+    async def test_approval_bypasses_requests(self) -> None:
+        """普通输入等待时审批仍可唤醒执行请求，回复序号保持递增。"""
         await self.start()
         await self.receive("approval-source", "执行工具")
-        message = await self.queue.get()
+        message = self.inputs.pop(0)
         future = asyncio.create_task(self.broker.request(message, {
             "name": "powershell", "arguments": {"command": "Write-Output ok"}, "reason": "需要确认",
         }))
@@ -130,8 +148,8 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         approval_id = next(iter(self.broker.pending))
         await self.receive("approval-answer", f"/approve {approval_id} allow")
         self.assertTrue(await asyncio.wait_for(future, 1))
-        self.assertEqual(self.queue.qsize(), 2)
-        await self.dispatcher.send(message, {"type": "status", "text": "已完成"})
+        self.assertEqual(len(self.inputs), 2)
+        await self.message_dispatcher.send(message, {"type": "status", "text": "已完成"})
         calls = self.api.post_c2c_message.await_args_list
         self.assertEqual([call.kwargs["msg_seq"] for call in calls], [1, 2])
         self.assertTrue(all(call.kwargs["msg_id"] == "approval-source" for call in calls))
@@ -141,21 +159,36 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
+    async def runtime_receive(self, msg_id: str, text: str) -> None:
+        """等待真实 Runtime 读取输入并完成该条消息的回复。"""
+        await self.channel._receive({"id": msg_id, "content": text, "author": {"user_openid": "user-a"}})
+
+        async def wait_reply() -> None:
+            """以消息关联记录释放作为完成条件。"""
+            while f"{self.channel.channel_id}:{msg_id}" in self.channel.replies:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_reply(), 2)
+
     async def test_runtime_new_and_persistence(self) -> None:
-        """验证 /new 与私聊通过同一 Runtime 队列，只有实际对话创建 JSONL。"""
+        """验证 /new 与私聊通过同一 Runtime 提交入口，只有实际对话创建 JSONL。"""
         with temporary_workspace("miniagent-qq-unit-") as root:
-            runtime = Runtime(ReplyRunner(), root / "sessions")
-            self.channel.queue = runtime.queue
-            self.channel.approvals = runtime.approvals
-            runtime.dispatcher.channels[self.channel.channel_id] = self.channel
+            config = Config(model="local", api_key="local", workdir=root)
+            patches = ExitStack()
+            # 仅测试临时替换常量，退出时自动恢复。
+            patches.enter_context(patch.object(runtime_module, "PROJECT_ROOT", root))
+            self.addCleanup(patches.close)
+            patches.enter_context(patch.object(runtime_module, "AsyncOpenAI", return_value=SimpleNamespace(close=AsyncMock())))
+            patches.enter_context(patch.object(runtime_module, "agent_loop", side_effect=reply_agent))
+            patches.enter_context(patch.object(runtime_module, "extract_memories", new=AsyncMock(return_value=0)))
+            runtime = AgentRuntime(config)
+            runtime.message_dispatcher.channels[self.channel.channel_id] = self.channel
             self.channel.api = self.api
             await runtime.start()
             try:
-                await self.receive("new-command", "/new")
-                await asyncio.wait_for(runtime.queue.join(), 2)
+                await self.runtime_receive("new-command", "/new")
                 self.assertFalse(list(root.rglob("*.jsonl")))
-                await self.receive("chat", "你好")
-                await asyncio.wait_for(runtime.queue.join(), 2)
+                await self.runtime_receive("chat", "你好")
                 records = [json.loads(line) for line in next(root.rglob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
                 self.assertEqual([item["payload"]["role"] for item in records], ["user", "assistant"])
                 self.assertEqual(self.api.post_c2c_message.await_args.kwargs["content"], "收到：你好")
@@ -167,8 +200,7 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_failure_closes_resources(self) -> None:
         """网关查询失败时不得注册为就绪，并且关闭已创建的 HTTP 连接。"""
         self.api.get_ws_url.side_effect = RuntimeError("模拟鉴权或网关错误")
-        with self.assertRaisesRegex(RuntimeError, "模拟"):
-            await self.channel.start()
+        self.assertFalse(await self.channel.start())
         self.http.close.assert_awaited_once()
         self.assertIsNone(self.channel.task)
 
@@ -177,8 +209,7 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         self.api.get_ws_url.side_effect = self.never_gateway
         self.channel.startup_timeout = 0.02
         before = set(asyncio.all_tasks())
-        with self.assertRaises(TimeoutError):
-            await self.channel.start()
+        self.assertFalse(await self.channel.start())
         self.assertFalse({task for task in asyncio.all_tasks() - before if not task.done()})
         self.http.close.assert_awaited_once()
 

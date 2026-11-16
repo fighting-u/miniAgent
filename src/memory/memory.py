@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -9,12 +8,14 @@ from typing import Any
 import yaml
 from openai import AsyncOpenAI
 
+from src.config import Config, PROJECT_ROOT
+
+
+# 共享长期记忆目录名。
+MEMORY_DIR_NAME = ".memory"
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
-
-# 长期记忆目录，每条记忆保存为一个独立的 Markdown 文件。
-MEMORY_DIR = Path(__file__).resolve().parents[2] / ".memory"
 
 # 辅助模型允许返回的长期记忆类型。
 MEMORY_TYPES = ("user_preference", "project_convention")
@@ -85,10 +86,10 @@ def memory_slug(name: str) -> str:
 def next_memory_path(name: str) -> Path:
     """生成不覆盖现有记忆的路径，冲突时从完整短名称后追加数字。"""
     slug = memory_slug(name)
-    candidate = MEMORY_DIR / f"{slug}.md"
+    candidate = (PROJECT_ROOT / MEMORY_DIR_NAME) / f"{slug}.md"
     suffix = 2
     while candidate.exists():
-        candidate = MEMORY_DIR / f"{slug}_{suffix}.md"
+        candidate = (PROJECT_ROOT / MEMORY_DIR_NAME) / f"{slug}_{suffix}.md"
         suffix += 1
     return candidate
 
@@ -126,11 +127,11 @@ def read_memory_preview(memory_file: Path) -> dict[str, str] | None:
 
 def list_memory_previews() -> list[dict[str, str]]:
     """按文件名顺序返回已有长期记忆的摘要预览。"""
-    if not MEMORY_DIR.exists():
+    if not (PROJECT_ROOT / MEMORY_DIR_NAME).exists():
         return []
 
     previews = []
-    for memory_file in sorted(MEMORY_DIR.glob("*.md")):
+    for memory_file in sorted((PROJECT_ROOT / MEMORY_DIR_NAME).glob("*.md")):
         preview = read_memory_preview(memory_file)
         if preview is not None:
             previews.append(preview)
@@ -152,7 +153,7 @@ def read_memory_file(filename: str) -> str:
     """仅按文件名读取长期记忆目录中的 Markdown 全文。"""
     if Path(filename).name != filename or not filename.lower().endswith(".md"):
         return ""
-    memory_file = MEMORY_DIR / filename
+    memory_file = (PROJECT_ROOT / MEMORY_DIR_NAME) / filename
     if not memory_file.is_file():
         return ""
     try:
@@ -203,7 +204,7 @@ def keyword_memory_selection(
 
 
 async def select_relevant_memories(
-    client: AsyncOpenAI, messages: list[Any], max_items: int = MAX_RECALL_ITEMS
+    client: AsyncOpenAI, messages: list[Any], config: Config, max_items: int = MAX_RECALL_ITEMS
 ) -> list[str]:
     """调用辅助模型，从摘要目录中选择与当前请求相关的记忆文件。"""
     records = list_memory_previews()
@@ -224,7 +225,7 @@ async def select_relevant_memories(
 
     try:
         response = await client.responses.create(
-            model=os.getenv("MODEL"),
+            model=config.model,
             instructions="你是长期记忆召回助手，只能返回符合要求的 JSON 数组。",
             input=prompt,
             max_output_tokens=200,
@@ -243,11 +244,11 @@ async def select_relevant_memories(
         return keyword_memory_selection(records, query, max_items)
 
 
-async def load_memories(client: AsyncOpenAI, messages: list[Any]) -> str:
+async def load_memories(client: AsyncOpenAI, messages: list[Any], config: Config) -> str:
     """读取辅助模型选中的记忆全文，并限制单次自动召回总字符数。"""
     loaded = []
     remaining = RECALL_CHAR_LIMIT
-    for filename in await select_relevant_memories(client, messages):
+    for filename in await select_relevant_memories(client, messages, config):
         content = read_memory_file(filename)
         if not content or remaining <= 0:
             continue
@@ -259,7 +260,7 @@ async def load_memories(client: AsyncOpenAI, messages: list[Any]) -> str:
 
 def write_memory_file(name: str, memory_type: str, description: str, body: str) -> Path:
     """把一条长期记忆写入新的 Markdown 文件，且不覆盖已有文件。"""
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    (PROJECT_ROOT / MEMORY_DIR_NAME).mkdir(parents=True, exist_ok=True)
     memory_path = next_memory_path(name)
     timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
     metadata = yaml.safe_dump(
@@ -277,7 +278,7 @@ def write_memory_file(name: str, memory_type: str, description: str, body: str) 
     return memory_path
 
 
-async def extract_memories(client: AsyncOpenAI, messages: list[Any]) -> int:
+async def extract_memories(client: AsyncOpenAI, messages: list[Any], config: Config) -> int:
     """调用辅助模型提取长期信息，并把有效结果分别写入记忆文件。"""
     dialogue = dialogue_text(messages)
     if not dialogue:
@@ -302,7 +303,7 @@ async def extract_memories(client: AsyncOpenAI, messages: list[Any]) -> int:
 
     try:
         response = await client.responses.create(
-            model=os.getenv("MODEL"),
+            model=config.model,
             instructions="你是长期记忆提取助手，只能返回符合要求的 JSON 数组。",
             input=prompt,
             max_output_tokens=1200,

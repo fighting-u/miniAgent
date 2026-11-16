@@ -2,9 +2,11 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+from src.config import PROJECT_ROOT
 
-# 日志文件保存目录。
-LOG_DIR = Path.cwd().resolve() / "logs"
+
+# 诊断日志目录名。
+LOG_DIR_NAME = "logs"
 
 # 诊断日志文件使用的最低日志等级。
 LOG_LEVEL = logging.INFO
@@ -22,9 +24,10 @@ def setup_logging() -> Path:
     if CURRENT_LOG_PATH is not None:
         return CURRENT_LOG_PATH
 
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir = PROJECT_ROOT / LOG_DIR_NAME
+    log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    CURRENT_LOG_PATH = LOG_DIR / f"mini_agent_{timestamp}.log"
+    CURRENT_LOG_PATH = log_dir / f"mini_agent_{timestamp}.log"
 
     formatter = logging.Formatter(LOG_FORMAT)
 

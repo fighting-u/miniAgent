@@ -3,22 +3,22 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from src.channels.base import Dispatcher, InboundMessage
+from src.channels.base import MessageDispatcher, InboundMessage
 
 
 # 审批请求、答复和断线拒绝的日志。
 logger = logging.getLogger(__name__)
 
-# 审批最长等待时间，避免无人操作时永久占用消费者。
+# 审批最长等待时间，避免无人操作时永久占用请求并发名额。
 APPROVAL_TIMEOUT_SECONDS = 120
 
 
 class ApprovalBroker:
-    """按审批标识匹配答复，控制消息不经过普通输入消费者。"""
+    """按审批标识匹配答复，审批答复不占用普通请求并发名额。"""
 
-    def __init__(self, dispatcher: Dispatcher) -> None:
+    def __init__(self, message_dispatcher: MessageDispatcher) -> None:
         """保存待答复项及其来源地址。"""
-        self.dispatcher = dispatcher
+        self.message_dispatcher = message_dispatcher
         self.pending: dict[str, tuple[InboundMessage, asyncio.Future[bool]]] = {}
 
     async def request(self, message: InboundMessage, event: dict[str, Any]) -> bool:
@@ -29,7 +29,7 @@ class ApprovalBroker:
         logger.warning("需要权限审批：request=%s tool=%s reason=%s",
                        message.request_id, event["name"], event["reason"])
         try:
-            sent = await self.dispatcher.send(message, {
+            sent = await self.message_dispatcher.send(message, {
                 "type": "approval", "approval_id": approval_id, "name": event["name"],
                 "arguments": event["arguments"], "reason": event["reason"],
             })

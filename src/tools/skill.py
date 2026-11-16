@@ -3,8 +3,8 @@ from pathlib import Path
 import yaml
 
 
-# 技能目录，每个技能使用一个子目录，并把完整说明写在子目录的 SKILL.md 中。
-SKILLS_DIR = Path(__file__).resolve().parents[2] / "skills"
+# 技能目录名，每个技能使用一个子目录和 SKILL.md。
+SKILLS_DIR_NAME = "skills"
 
 
 class SkillLoader:
@@ -59,7 +59,3 @@ class SkillLoader:
 
         available = ", ".join(self.skills) or "(none)"
         return f"Error: Unknown skill '{name}'. Available: {available}"
-
-
-# 当前 Agent 共享的技能加载器。
-SKILL_LOADER = SkillLoader(SKILLS_DIR)

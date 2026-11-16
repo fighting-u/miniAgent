@@ -8,7 +8,6 @@ from contextlib import ExitStack, aclosing
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 
@@ -19,12 +18,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tests.temp_workspace import temporary_workspace
 
+from src.config import Config
 from src.agent import core
 from src.context.context_compactor import ContextCompactor
-from src.tools.mcp_client import MCPClient
+from src.tools.mcp_manager import MCPManager
 from src.memory.memory import message_text
 from src.session.session_store import SessionStore
-from src.tools.tools import initialize_tools
 
 
 # 临时真实 MCP 服务源码：只提供一个工具，执行次数和进程号写入临时目录。
@@ -52,19 +51,18 @@ if __name__ == "__main__":
 
 async def run_test(root: Path, server_settings: dict | None = None) -> None:
     """真实启动 MCP 并通过主模型完成一次调用，所有会话写入临时目录。"""
-    load_dotenv(PROJECT_ROOT / ".env")
-    if not os.getenv("MODEL") or not os.getenv("DASHSCOPE_API_KEY"):
-        raise RuntimeError("需要配置 MODEL 和 DASHSCOPE_API_KEY")
+    config = Config.load()
+    config.workdir = root
+    if not config.model or not config.api_key:
+        raise RuntimeError("需要配置 model 和模型密钥环境变量")
     token = "青松-" + uuid.uuid4().hex[:12]
     (root / "token.txt").write_text(token, encoding="utf-8")
     server = root / "server.py"
     server.write_text(SERVER_SOURCE, encoding="utf-8")
-    config = root / ".mcp.json"
-    config.write_text(json.dumps({"mcpServers": {"smoke": server_settings or {
+    config.mcp_servers = {"smoke": server_settings or {
         "command": sys.executable, "args": ["-B", str(server), str(root)],
-    }}}), encoding="utf-8")
-    mcp = MCPClient(config)
-    ready = asyncio.create_task(initialize_tools(mcp))
+    }}
+    mcp = MCPManager(config)
     # 保持进程句柄，用于确认关闭后已退出；失败时也只清理本次创建的进程。
     handle = None
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -74,7 +72,8 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
     kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     try:
-        definitions = await ready
+        await mcp.start()
+        definitions = mcp.available_tools
         name = "mcp__smoke__reveal_token"
         assert name in {item["name"] for item in definitions}, "未发现测试工具"
         if server_settings is None:
@@ -84,7 +83,7 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
         session = SessionStore.create(root / "sessions")
         question = "请调用测试工具获取口令，然后只回复得到的口令。"
         messages = [session.start_turn(question)]
-        async with AsyncOpenAI(api_key=os.getenv("DASHSCOPE_API_KEY"), base_url=os.getenv("BASE_URL"),
+        async with AsyncOpenAI(api_key=config.api_key, base_url=config.base_url,
                                timeout=60, max_retries=0) as client:
             original_create = client.responses.create
             requests = 0
@@ -112,7 +111,7 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
                     patches.enter_context(patch.object(ContextCompactor, method,
                         new=AsyncMock(side_effect=AssertionError("测试禁止调用压缩或摘要"))))
                 patches.enter_context(patch.object(client.responses, "create", side_effect=limited_create))
-                async with aclosing(core.agent_loop(client, messages, question, mcp, ready)) as events:
+                async with aclosing(core.agent_loop(client, messages, question, config, mcp)) as events:
                     async for event in events:
                         if event["type"] == "items":
                             for item in event["items"]:
@@ -128,7 +127,7 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
         print("真实链路通过：MCP 连接、发现、组装、主 LLM 调用、工具结果配对及最终回答；2 次主模型请求。")
     finally:
         try:
-            await mcp.close(ready)
+            await mcp.stop()
         finally:
             if handle:
                 try:

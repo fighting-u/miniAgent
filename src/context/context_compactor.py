@@ -7,6 +7,13 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from src.config import Config, PROJECT_ROOT
+
+
+# 上下文压缩前完整对话的归档目录名。
+TRANSCRIPT_DIR_NAME = ".transcripts"
+# 大工具结果的相对目录名。
+TOOL_RESULTS_DIR_NAME = ".task_outputs/tool-results"
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
@@ -32,28 +39,19 @@ KEEP_RECENT_MESSAGES = 5
 # 自动压缩目标占上下文字符阈值的比例。
 COMPACT_TARGET_RATIO = 0.8
 
-# 工具结果转存目录。
-TOOL_RESULTS_DIR = Path.cwd().resolve() / ".task_outputs" / "tool-results"
-
-# 完整对话历史的归档目录。
-TRANSCRIPT_DIR = Path.cwd().resolve() / ".transcripts"
-
-
 class ContextCompactor:
     """按确定性裁剪、结果落盘和模型摘要五步压缩上下文。"""
 
     def __init__(
         self,
         client: AsyncOpenAI,
-        model: str,
-        transcript_dir: Path = TRANSCRIPT_DIR,
-        tool_results_dir: Path = TOOL_RESULTS_DIR,
+        config: Config,
     ) -> None:
         """保存摘要所需客户端、模型名以及两类归档目录。"""
         self.client = client
-        self.model = model
-        self.transcript_dir = transcript_dir
-        self.tool_results_dir = tool_results_dir
+        self.model = config.model
+        self.transcript_dir = PROJECT_ROOT / TRANSCRIPT_DIR_NAME
+        self.tool_results_dir = PROJECT_ROOT / TOOL_RESULTS_DIR_NAME
 
     @staticmethod
     def item_value(item: Any, name: str, default: Any = None) -> Any:

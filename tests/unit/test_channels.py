@@ -1,6 +1,5 @@
 import asyncio
 import json
-import os
 import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
@@ -9,10 +8,10 @@ import httpx
 from openai import AsyncOpenAI
 from websockets.asyncio.client import connect
 
-from src.agent import core, hook
-from src.channels.manager import ChannelManager
-from src.runtime.runner import AgentRunner
-from src.runtime.runtime import Runtime
+from src.agent import core
+from src.config import Config
+from src.runtime import runtime as runtime_module
+from src.runtime.runtime import AgentRuntime
 from src.session.session_store import SessionStore, omit_none
 from src.terminal import TerminalClient
 from src.tools import tools
@@ -48,7 +47,7 @@ class ScriptedUI:
 
 
 class ChannelTests(unittest.IsolatedAsyncioTestCase):
-    """验证客户端、真实 WebSocket、队列、Agent 和 JSONL 的完整本地链路。"""
+    """验证客户端、真实 WebSocket、提交入口、Agent 和 JSONL 的完整本地链路。"""
 
     async def asyncSetUp(self) -> None:
         """创建独立服务和真实 SDK 模拟传输，失败也关闭连接并删除文件。"""
@@ -57,24 +56,29 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.root = self.stack.enter_context(temporary_workspace("miniagent-channel-"))
         self.outputs: list[list[dict]] = []
         self.requests: list[dict] = []
-        self.stack.enter_context(patch.dict(os.environ, {"MODEL": "channel-test-model"}))
-        self.stack.enter_context(patch.object(tools, "WORKDIR", self.root))
-        self.stack.enter_context(patch.object(hook, "WORKDIR", self.root))
+        self.config = Config(model="channel-test-model", api_key="local-test",
+                             base_url="https://channel-test.invalid/v1", workdir=self.root,
+                             mcp_servers={},
+                             channels=[{"id": "terminal_test", "type": "terminal",
+                                        "options": {"host": "127.0.0.1", "port": 0}}])
+        # 测试临时替换使用处的常量，避免向正式会话目录写入数据。
+        self.stack.enter_context(patch.object(runtime_module, "PROJECT_ROOT", self.root))
         self.stack.enter_context(patch.object(core, "load_memories", new=AsyncMock(return_value="")))
         self.stack.enter_context(patch.object(core, "build_system_prompt", return_value="按要求调用工具。"))
-        self.client = AsyncOpenAI(api_key="local-test", base_url="https://channel-test.invalid/v1",
-                                  max_retries=0, http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.respond)))
-        self.addAsyncCleanup(self.client.close)
-        runner = AgentRunner(self.client)
-        self.stack.enter_context(patch.object(runner, "extract", new=AsyncMock(return_value=0)))
-        self.runtime = Runtime(runner, self.root / "sessions")
-        self.manager = ChannelManager(self.runtime.queue, self.runtime.approvals, self.runtime.dispatcher)
-        # 先关闭监听、再排空消费者，最后关闭 SDK 和删除临时目录。
+        self.stack.enter_context(patch.object(runtime_module, "AsyncOpenAI", side_effect=self.create_client))
+        self.stack.enter_context(patch.object(runtime_module, "extract_memories", new=AsyncMock(return_value=0)))
+        self.runtime = AgentRuntime(self.config)
+        self.manager = self.runtime.channels
+        # 先关闭监听、再完成请求，最后关闭 SDK 和删除临时目录。
         self.addAsyncCleanup(self.close_service)
         await self.runtime.start()
-        await self.manager.start({"channels": [{"id": "terminal_test", "type": "terminal",
-                                                 "options": {"host": "127.0.0.1", "port": 0}}]})
-        self.url = self.runtime.dispatcher.channels["terminal_test"].uri
+        self.url = self.runtime.message_dispatcher.channels["terminal_test"].uri
+
+    def create_client(self, **kwargs):
+        """让运行时自行创建真实 SDK 客户端，每次重建服务都使用独立 HTTP 连接。"""
+        self.client = AsyncOpenAI(**kwargs, max_retries=0,
+                                  http_client=httpx.AsyncClient(transport=httpx.MockTransport(self.respond)))
+        return self.client
 
     def respond(self, request: httpx.Request) -> httpx.Response:
         """让真实 SDK 解析预设 Responses 响应，意外额外请求直接失败。"""
@@ -87,8 +91,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         })
 
     async def close_service(self) -> None:
-        """无论断言是否通过都回收监听器、连接、消费者和后台任务。"""
-        await self.manager.stop()
+        """无论断言是否通过都回收监听器、连接、请求和后台任务。"""
         await self.runtime.stop()
 
     async def exchange(self, socket, text: str, session_id: str = "") -> list[dict]:
@@ -111,16 +114,16 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         ], [assistant_message("口令：青松42")], [assistant_message("仍然是青松42")]])
         original_read = tools.run_read
 
-        def verify_recorded_before_read(path: str) -> str:
+        def verify_recorded_before_read(path: str, *, config) -> str:
             """真实工具开始前，整批调用必须已经持久化。"""
             files = list((self.root / "sessions").rglob("*.jsonl"))
             store, _ = SessionStore.load(files[0])
             self.assertEqual(set(store.pending_calls), {"read", "glob", "plan"})
-            return original_read(path)
+            return original_read(path, config=config)
 
         ui = ScriptedUI(["/new", "读取文件并更新计划", "/q"])
         terminal = TerminalClient(self.url, ui)
-        with patch.dict(core.TOOL_HANDLERS, {"read_file": verify_recorded_before_read}):
+        with patch.object(tools, "run_read", verify_recorded_before_read):
             await asyncio.wait_for(terminal.run(), 15)
         self.assertEqual(len(ui.snapshots), 2)
         self.assertTrue(all(not history for history in ui.snapshots))
@@ -148,7 +151,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.requests)
 
     async def test_permission_allow_and_deny(self) -> None:
-        """审批绕过消费者返回决定，允许时执行一次，拒绝时不执行。"""
+        """审批绕过普通请求并发限制返回决定，允许时执行一次，拒绝时不执行。"""
         self.outputs.extend([
             [function_call("allow", "powershell", '{"command":"Set-Content fixture approved"}')],
             [assistant_message("已批准")],
@@ -157,7 +160,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         ])
         executed = []
 
-        def command(command: str) -> str:
+        def command(command: str, *, config) -> str:
             """记录工具调用，测试审批链路而不更改真实 PowerShell 环境。"""
             executed.append(command)
             return "执行完成"
@@ -167,7 +170,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         async with connect(self.url, proxy=None) as socket:
             terminal.connection = socket
             await terminal.request("/attach")
-            with patch.dict(core.TOOL_HANDLERS, {"powershell": command}):
+            with patch.object(tools, "run_powershell", command):
                 await asyncio.wait_for(terminal.request("需要批准"), 10)
                 ui.allow = False
                 await asyncio.wait_for(terminal.request("需要拒绝"), 10)
@@ -211,8 +214,8 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         executed = []
         async with connect(self.url, proxy=None) as socket:
             attached = await self.exchange(socket, "/attach")
-            with patch.object(SessionStore, "append", fail_call), patch.dict(
-                    core.TOOL_HANDLERS, {"get_current_time": lambda: executed.append(True)}):
+            with patch.object(SessionStore, "append", fail_call), patch.object(
+                    tools, "run_get_current_time", lambda: executed.append(True)):
                 events = await self.exchange(socket, "时间", attached[-1]["session_id"])
         self.assertFalse(executed)
         self.assertTrue(any(e["type"] == "error" and "磁盘" in e["text"] for e in events))
@@ -238,7 +241,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                 await socket.send(json.dumps({"input": "断线测试", "session_id": session_id}))
                 await asyncio.wait_for(started.wait(), 5)
             release.set()
-            await asyncio.wait_for(self.runtime.queue.join(), 5)
+            await asyncio.wait_for(asyncio.gather(*list(self.runtime.requests)), 5)
         async with connect(self.url, proxy=None) as socket:
             events = await self.exchange(socket, "/resume " + session_id)
         snapshot = next(event for event in events if event["type"] == "session")
@@ -252,13 +255,10 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
             session_id = events[-1]["session_id"]
             await self.exchange(socket, "重启前的问题", session_id)
         await self.close_service()
-        self.runtime = Runtime(AgentRunner(self.client), self.root / "sessions")
-        self.stack.enter_context(patch.object(self.runtime.runner, "extract", new=AsyncMock(return_value=0)))
-        self.manager = ChannelManager(self.runtime.queue, self.runtime.approvals, self.runtime.dispatcher)
+        self.runtime = AgentRuntime(self.config)
+        self.manager = self.runtime.channels
         await self.runtime.start()
-        await self.manager.start({"channels": [{"id": "terminal_test", "type": "terminal",
-                                                 "options": {"host": "127.0.0.1", "port": 0}}]})
-        self.url = self.runtime.dispatcher.channels["terminal_test"].uri
+        self.url = self.runtime.message_dispatcher.channels["terminal_test"].uri
         async with connect(self.url, proxy=None) as socket:
             events = await self.exchange(socket, "/attach")
             self.assertEqual(events[-1]["session_id"], session_id)

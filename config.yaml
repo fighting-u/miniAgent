@@ -17,8 +17,8 @@ powershell_timeout: 120
 extra_allowed_dirs:
 - D:/projects/others/interview_post_crawl/面经
 
-# AgentRuntime接收InboundMessage的队列配置
-queue_size: 10
+# AgentRuntime 同时处理请求的最大数量。
+max_concurrent_requests: 10
 
 # 通道channel相关配置
 # id 标识每个实例，type 表示tunnel类型，enabled 控制启动。

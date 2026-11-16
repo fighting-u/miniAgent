@@ -8,17 +8,16 @@
 ```text
 miniAgent/
 ├── src/                        # Python 源码包，各子目录通过 __init__.py 标记为包
-│   ├── __main__.py             # python -m src 常驻程序启动入口
-│   ├── server.py               # 共享资源初始化、通道启动与服务收尾
+│   ├── __main__.py             # python -m src 入口、运行时与通道组装及收尾
+│   ├── config.py               # Config 类、项目根目录和唯一 YAML 配置读取
 │   ├── terminal.py             # python -m src.terminal 独立终端客户端
 │   ├── channels/               # 通道协议适配
-│   │   ├── base.py             # 统一输入、通道基类和 Dispatcher
-│   │   ├── manager.py          # 配置读取、类型注册与实例生命周期
+│   │   ├── base.py             # 统一输入、通道基类和 MessageDispatcher
+│   │   ├── manager.py          # 类型注册、实例生命周期与多通道输入流合并
 │   │   ├── terminal.py         # 常驻端 WebSocket 监听与回复发送
 │   │   └── qq.py               # QQ 官方鉴权、网关心跳与好友私聊收发
 │   ├── runtime/                # 常驻运行协调
-│   │   ├── runtime.py          # 输入队列、单消费者、会话锁和事件持久化
-│   │   ├── runner.py           # Agent 执行边界，预留执行池扩展
+│   │   ├── runtime.py          # AgentRuntime：模型/MCP 生命周期、统一输入流读取、并发提交、会话和持久化
 │   │   └── permissions.py      # 审批等待和控制消息回传
 │   ├── agent/                  # Agent 主流程
 │   │   ├── core.py             # 对话循环、模型请求和工具调度
@@ -26,7 +25,7 @@ miniAgent/
 │   │   └── system_prompt.py    # 构建模型系统提示词
 │   ├── tools/                  # 工具与扩展接入
 │   │   ├── tools.py            # 工具初始化、处理函数和任务计划管理
-│   │   ├── mcp_client.py       # MCP 连接、工具发现和调用
+│   │   ├── mcp_manager.py      # MCP 生命周期、工具发现、注册和调用
 │   │   └── skill.py            # 本地技能发现与按需加载
 │   ├── memory/                 # 长期记忆
 │   │   └── memory.py           # 长期记忆提取、存储和召回
@@ -38,8 +37,7 @@ miniAgent/
 │   │   └── terminal_ui.py      # 终端输入、菜单和历史展示
 │   └── common/
 │       └── logging_config.py   # 文件诊断日志配置
-├── .mcp.json                   # MCP 服务器启动配置，默认不连接任何服务器
-├── .channels.yaml              # 通道实例配置、终端监听地址与输入队列容量
+├── config.yaml                # 模型、工作区、通道、MCP 和并发上限的统一运行配置
 ├── skills/                     # 本地技能目录
 │   └── code-review/
 │       └── SKILL.md            # 代码审查技能的元数据和完整说明
@@ -47,7 +45,7 @@ miniAgent/
 │   ├── 基础工具设计.md          # 内置工具、工作区路径与权限管控
 │   ├── 持久化设计.md            # 会话 JSONL 持久化格式与事件顺序设计
 │   ├── 终端运行界面设计.md      # 自动恢复、命令菜单和历史展示约定
-│   ├── 多通道设计.md            # 常驻程序、通道队列、事件分发与终端客户端改造方案
+│   ├── 多通道设计.md            # 常驻程序、通道提交、事件分发与终端客户端改造方案
 │   ├── 记忆压缩设计.md          # 上下文压缩流程、归档和恢复限制
 │   ├── 长期记忆设计.md          # 稳定信息的提取、存储和按需召回
 │   ├── mcp接入设计.md           # MCP 接入准备与待实现范围
@@ -55,7 +53,7 @@ miniAgent/
 ├── tests/                      # 测试目录，子目录通过 __init__.py 支持递归发现
 │   ├── temp_workspace.py       # 继承工作区权限、自动清理的测试临时目录
 │   ├── unit/
-│   │   ├── test_channels.py    # WebSocket、终端客户端、队列和事件持久化测试
+│   │   ├── test_channels.py    # WebSocket、终端客户端、并发提交和事件持久化测试
 │   │   ├── test_qq.py          # QQ 网关握手、心跳、私聊路由和资源清理测试
 │   │   └── test_sessions.py    # 本地 SDK、工具循环与加载恢复测试
 │   └── integration/
@@ -82,10 +80,14 @@ python -m src
 python -m src.terminal
 ```
 
-默认监听 `ws://127.0.0.1:8765`，在 `.channels.yaml` 中配置；客户端可用 `--url` 指定地址，常驻端可用 `--config` 指定配置文件。`/q` 只断开终端，常驻程序通过其所在终端的 Ctrl+C 停止。
+统一配置通过 `Config.load()` 从根目录 `config.yaml` 读取。模型名称和 `base_url` 配置在 YAML；模型密钥及 QQ 凭据保留在本地 `.env`，由配置层统一解析。工作区和额外允许目录的相对路径以所选 YAML 所在目录为基准，工作区默认是项目根目录；会话、技能、记忆、日志、归档和工具结果的目录名常量分别定义在负责模块中，使用时与 `PROJECT_ROOT` 拼接，不从 YAML 读取；不再由工具模块各自读取启动目录或环境变量。旧的 `.mcp.json`、`.channels.yaml` 已合并并移除。
 
-QQ 好友私聊通道也由同一个常驻程序启动，在本地 `.env` 配置 `QQ_APP_ID` 和 `QQ_APP_SECRET`；`.channels.yaml` 只保存环境变量名，不保存密钥。不使用 QQ 时将 `qq_main.enabled` 设为 `false`。QQ 使用共享当前会话，支持普通文本、`/new`、`/resume` 等命令；工具过程不逐条发送，助手回答在本轮结束后合并回复。审批用消息中的 `/approve <审批ID> allow|deny` 答复。
+默认监听 `ws://127.0.0.1:8765`，在 `config.yaml` 中配置；常驻端固定读取当前启动目录下的 `config.yaml`，客户端可用 `--config` 指定配置文件，也可用 `--url` 覆盖连接地址。`/q` 只断开终端，常驻程序通过其所在终端的 Ctrl+C 停止。
+
+QQ 好友私聊通道也由同一个常驻程序启动，在本地 `.env` 配置 `QQ_APP_ID` 和 `QQ_APP_SECRET`；`config.yaml` 只保存环境变量名，不保存密钥。不使用 QQ 时将 `qq_main.enabled` 设为 `false`。QQ 使用共享当前会话，支持普通文本、`/new`、`/resume` 等命令；工具过程不逐条发送，助手回答在本轮结束后合并回复。审批用消息中的 `/approve <审批ID> allow|deny` 答复。
 
 只验证 QQ 连接：`.venv\Scripts\python.exe -B -X utf8 tests/integration/live_qq.py`。测试读取本地配置，确认鉴权、网关 READY 与心跳 ACK，成功或失败都会关闭连接并删除临时日志；不调用模型或发送 QQ 消息。
+
+本轮配置与架构改造只做静态检查，测试代码已适配，尚未重新运行。
 
 本地回归测试：`.venv\Scripts\python.exe -B -X utf8 -m unittest discover -s tests/unit -v`。真实端到端测试：`.venv\Scripts\python.exe -B -X utf8 tests/integration/live_channels.py`，使用现有模型配置，成功或失败均清理本次临时文件和子进程。设计与验证边界见 [多通道设计](docs/多通道设计.md)。

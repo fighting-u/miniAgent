@@ -3,7 +3,6 @@
 import asyncio
 import logging
 
-from src.channels.manager import ChannelManager
 from src.common.logging_config import setup_logging
 from src.config import Config
 from src.runtime.runtime import AgentRuntime
@@ -14,24 +13,16 @@ logger = logging.getLogger(__name__)
 
 
 async def serve(config: Config) -> None:
-    """组装运行时和通道管理器，资源初始化及回收均交给对应对象。"""
+    """启动运行时，通道与模型资源均由 Runtime 管理。"""
     log_path = setup_logging()
     logger.info("MiniAgent 常驻程序启动，本次日志文件：%s", log_path)
     runtime = AgentRuntime(config)
-    manager = ChannelManager(runtime)
     try:
         await runtime.start()
-        await manager.start()
-        for channel in runtime.dispatcher.channels.values():
-            print(f"通道已就绪：{channel.channel_id} {getattr(channel, 'uri', '')}", flush=True)
         print("常驻程序运行中，另开终端执行 python -m src.terminal；Ctrl+C 停止。", flush=True)
         await asyncio.Future()
     finally:
-        try:
-            # 先关闭入口及审批等待，再完成已接受的请求和后台记忆任务。
-            await manager.stop()
-        finally:
-            await runtime.stop()
+        await runtime.stop()
 
 
 def main() -> None:

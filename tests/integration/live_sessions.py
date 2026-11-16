@@ -8,7 +8,6 @@ from contextlib import AsyncExitStack, aclosing
 from pathlib import Path
 from unittest.mock import patch
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 
@@ -18,8 +17,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from tests.temp_workspace import temporary_workspace
 
-from src.agent import core, hook
-from src.tools import tools
+from src.config import Config
+from src.agent import core
 from src.context.context_compactor import ContextCompactor
 from src.memory.memory import message_text
 from src.session.session_store import SessionStore
@@ -32,12 +31,13 @@ def read_records(path: Path) -> list[dict]:
 
 async def worker(phase: str, state_path: Path) -> None:
     """在独立进程中调用真实 API，首轮结束后硬退出，第二轮从 JSONL 恢复。"""
-    load_dotenv(PROJECT_ROOT / ".env")
+    config = Config.load()
+    config.workdir = state_path.parent.resolve()
     # 与常驻程序使用同一套环境配置，不输出密钥或其他认证内容。
-    model = os.getenv("MODEL")
-    api_key = os.getenv("DASHSCOPE_API_KEY")
+    model = config.model
+    api_key = config.api_key
     if not model or not api_key:
-        raise RuntimeError("真实测试需要配置 MODEL 和 DASHSCOPE_API_KEY。")
+        raise RuntimeError("真实测试需要配置 model 和模型密钥环境变量。")
     if phase == "first":
         # 会话和工具读取的文件均位于父进程管理的临时目录，不写入正式 sessions。
         session = SessionStore.create(state_path.parent / "sessions")
@@ -58,8 +58,6 @@ async def worker(phase: str, state_path: Path) -> None:
     history.append(session.start_turn(question))
     async with AsyncExitStack() as stack:
         # 仅保留简短会话和只读文件工具，避免无关记忆写入或压缩增加测试复杂度。
-        stack.enter_context(patch.object(tools, "WORKDIR", state_path.parent.resolve()))
-        stack.enter_context(patch.object(hook, "WORKDIR", state_path.parent.resolve()))
         stack.enter_context(patch.object(core, "load_memories", return_value=""))
         stack.enter_context(patch.object(core, "build_system_prompt", return_value=
                                         "你正在进行简短会话测试。按用户要求读取文件、记住口令并简短回答。"))
@@ -69,7 +67,7 @@ async def worker(phase: str, state_path: Path) -> None:
             stack.enter_context(patch.object(ContextCompactor, name,
                                             side_effect=AssertionError("真实测试不应触发压缩")))
         client = await stack.enter_async_context(AsyncOpenAI(
-            api_key=api_key, base_url=os.getenv("BASE_URL"), timeout=60, max_retries=0,
+            api_key=api_key, base_url=config.base_url, timeout=60, max_retries=0,
         ))
         original_create = client.responses.create
         call_count = 0
@@ -86,7 +84,7 @@ async def worker(phase: str, state_path: Path) -> None:
             return await original_create(**kwargs)
 
         stack.enter_context(patch.object(client.responses, "create", side_effect=limited_create))
-        async with aclosing(core.agent_loop(client, history, question)) as events:
+        async with aclosing(core.agent_loop(client, history, question, config)) as events:
             async for event in events:
                 if event["type"] == "items":
                     for item in event["items"]:

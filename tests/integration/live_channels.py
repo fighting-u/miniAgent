@@ -22,28 +22,21 @@ async def server_worker(root: Path) -> None:
     """复用真实常驻启动入口和模型 API，只隔离辅助记忆、配置及测试数据。"""
     from openai import AsyncOpenAI
 
-    from src import server
-    from src.agent import core, hook
+    from src import __main__ as server
+    from src.agent import core
     from src.channels.manager import ChannelManager
-    from src.common import logging_config
     from src.context.context_compactor import ContextCompactor
-    from src.runtime.runner import AgentRunner
-    from src.tools import tools
-    from src.tools.mcp_client import MCPClient
+    from src.config import Config
+    from src.common import logging_config
+    from src.runtime import runtime as runtime_module
 
     original_start = ChannelManager.start
     calls = 0
 
-    def create_mcp():
-        """本测试只验证内置工具，避免连接用户配置中的外部 MCP 服务。"""
-        config = root / "mcp.json"
-        config.write_text('{"mcpServers": {}}', encoding="utf-8")
-        return MCPClient(config)
-
-    async def publish_ready(manager, settings):
+    async def publish_ready(manager):
         """在真实监听就绪后发布随机端口，父进程不抢占固定端口。"""
-        await original_start(manager, settings)
-        uri = next(iter(manager.dispatcher.channels.values())).uri
+        await original_start(manager)
+        uri = next(iter(manager.message_dispatcher.channels.values())).uri
         (root / "ready.json").write_text(json.dumps({"url": uri}), encoding="utf-8")
 
     def create_client(**kwargs):
@@ -69,20 +62,23 @@ async def server_worker(root: Path) -> None:
 
     with ExitStack() as patches:
         patches.enter_context(patch.object(ChannelManager, "start", publish_ready))
-        patches.enter_context(patch.object(server, "AsyncOpenAI", side_effect=create_client))
-        patches.enter_context(patch.object(server, "MCPClient", side_effect=create_mcp))
-        patches.enter_context(patch.object(logging_config, "LOG_DIR", root / "logs"))
+        patches.enter_context(patch.object(runtime_module, "AsyncOpenAI", side_effect=create_client))
         patches.enter_context(patch.object(core, "load_memories", new=AsyncMock(return_value="")))
-        patches.enter_context(patch.object(AgentRunner, "extract", new=AsyncMock(return_value=0)))
+        patches.enter_context(patch.object(runtime_module, "extract_memories", new=AsyncMock(return_value=0)))
         patches.enter_context(patch.object(core, "build_system_prompt", return_value=
             "你在验证 Windows 终端工具链。先读取用户指定的文件，再执行用户指定的 Write-Output 命令。"
             "最后回答读取到的口令。后续问题只根据历史回答，不需要计划或额外工具。"))
-        patches.enter_context(patch.object(tools, "WORKDIR", root))
-        patches.enter_context(patch.object(hook, "WORKDIR", root))
         for name in ("write_transcript", "save_output", "summarize_history"):
             patches.enter_context(patch.object(ContextCompactor, name,
                 side_effect=AssertionError("短对话测试不得产生压缩文件")))
-        task = asyncio.create_task(server.serve(root / "channels.yaml", root / "sessions"))
+        config = Config.load()
+        config.channels = json.loads((root / "config.yaml").read_text(encoding="utf-8"))["channels"]
+        config.mcp_servers = {}
+        config.workdir = root
+        # 测试临时替换落盘常量，退出时恢复；记忆和压缩已在上方禁用。
+        patches.enter_context(patch.object(runtime_module, "PROJECT_ROOT", root))
+        patches.enter_context(patch.object(logging_config, "PROJECT_ROOT", root))
+        task = asyncio.create_task(server.serve(config))
         try:
             while not (root / "stop").exists():
                 if task.done():
@@ -156,7 +152,7 @@ def run_parent() -> None:
             root_path = root
             token = "青松-" + root.name[-10:]
             (root / "note.txt").write_text("本次验证口令：" + token, encoding="utf-8")
-            (root / "channels.yaml").write_text(json.dumps({"channels": [{
+            (root / "config.yaml").write_text(json.dumps({"channels": [{
                 "id": "terminal_live", "type": "terminal", "options": {"host": "127.0.0.1", "port": 0},
             }]}), encoding="utf-8")
             env = dict(os.environ, PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")

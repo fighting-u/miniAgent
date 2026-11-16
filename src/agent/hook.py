@@ -2,7 +2,8 @@ import logging
 import re
 from typing import Any, Callable
 
-from src.tools.tools import WORKDIR, is_allowed_path
+from src.config import Config
+from src.tools.tools import is_allowed_path
 
 
 # 当前模块使用的日志记录器。
@@ -67,12 +68,12 @@ def contains_destructive_command(command: str) -> bool:
 PERMISSION_RULES = [
     {
         "tools": ["read_file", "write_file", "edit_file"],
-        "check": lambda args: not is_allowed_path((WORKDIR / str(args.get("path", ""))).resolve()),
+        "check": lambda args, config: not is_allowed_path((config.workdir / str(args.get("path", ""))).resolve(), config),
         "message": "访问允许的目录之外的文件",
     },
     {
         "tools": ["powershell"],
-        "check": lambda args: contains_destructive_command(str(args.get("command", "")))
+        "check": lambda args, config: contains_destructive_command(str(args.get("command", "")))
         or any(
             keyword in str(args.get("command", "")).casefold()
             for keyword in POWERSHELL_SENSITIVE_KEYWORDS
@@ -91,19 +92,19 @@ def check_deny_list(command: str) -> str | None:
     return None
 
 
-def check_rules(tool_name: str, tool_input: dict[str, Any]) -> str | None:
+def check_rules(tool_name: str, tool_input: dict[str, Any], config: Config) -> str | None:
     """按照权限规则检查工具调用是否需要用户审批。"""
     for rule in PERMISSION_RULES:
-        if tool_name in rule["tools"] and rule["check"](tool_input):
+        if tool_name in rule["tools"] and rule["check"](tool_input, config):
             return rule["message"]
     return None
 
 
 # 权限闸门保留以上规则；交互审批由 Agent 事件和 Runtime 审批代理完成。
 
-def workdir_log_hook() -> None:
+def workdir_log_hook(config: Config) -> None:
     """在读取用户输入前输出当前工作目录。"""
-    logger.info("[Hook] 当前工作目录：%s", WORKDIR)
+    logger.info("[Hook] 当前工作目录：%s", config.workdir)
     return None
 
 

@@ -4,7 +4,6 @@ import logging
 import re
 from datetime import timedelta
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -14,14 +13,15 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from src.config import Config
+from src.tools.tools import assemble_tools
+
 
 # MCP 连接与工具发现的总等待时间，以及单次工具调用的等待时间。
 MCP_CONNECT_TIMEOUT = 30
 MCP_CALL_TIMEOUT = 30
 # HTTP 首次连接最多尝试三次，包含第一次连接。
 MCP_HTTP_CONNECT_ATTEMPTS = 3
-# 默认配置位于项目根目录；缺失时仅使用内置工具。
-MCP_CONFIG_PATH = Path(__file__).resolve().parents[2] / ".mcp.json"
 # 当前模块诊断日志记录器。
 logger = logging.getLogger(__name__)
 
@@ -31,40 +31,20 @@ def normalize_mcp_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "_", name) or "_"
 
 
-def first_config_values(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """解析配置时保留重复键的第一项，避免同名服务器被后面的配置覆盖。"""
-    values = {}
-    for key, value in pairs:
-        if key in values:
-            logger.warning("MCP 配置键 %s 重复，保留第一项", key)
-            continue
-        values[key] = value
-    return values
-
-
-class MCPClient:
+class MCPManager:
     """维护 stdio 或 Streamable HTTP 连接、静态工具定义及调用路由。"""
 
-    def __init__(self, config_path: Path = MCP_CONFIG_PATH) -> None:
-        """保存配置路径和连接任务，所有状态仅属于当前进程。"""
-        self.config_path = config_path
+    def __init__(self, config: Config) -> None:
+        """保存统一配置和连接任务，不再自行读取另一个配置文件。"""
+        self.config = config
         self.tools: list[dict[str, Any]] = []
+        self.available_tools: list[dict[str, Any]] = []  # 启动完成后发布给 Agent 的完整工具定义。
         self.routes: dict[str, tuple[ClientSession, str]] = {}
         self.tasks: list[asyncio.Task[None]] = []
 
-    async def initialize(self) -> None:
-        """并行连接配置中的服务器，全部发现完成后发布静态列表。"""
-        try:
-            if not self.config_path.exists():
-                return
-            config = json.loads(self.config_path.read_text(encoding="utf-8"), object_pairs_hook=first_config_values)
-            servers = config["mcpServers"]
-            if not isinstance(servers, dict):
-                raise ValueError("mcpServers 必须是对象")
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            logger.warning("MCP 配置读取失败：%s", error)
-            print(f"MCP 配置无效，继续使用内置工具：{error}")
-            return
+    async def start(self) -> None:
+        """并行连接服务器，完成工具发现、路由注册和完整工具列表组装。"""
+        servers = self.config.mcp_servers
         # 每个连接任务自行进入和退出 SDK 上下文，避免跨任务关闭 AnyIO 取消作用域。
         pending = []
         seen_names = set()
@@ -86,6 +66,7 @@ class MCPClient:
                 continue
             self.tools.extend(definitions)
             self.routes.update(routes)
+        self.available_tools = assemble_tools(self.tools)
 
     @asynccontextmanager
     async def _transport(self, settings: dict[str, Any]):
@@ -169,7 +150,7 @@ class MCPClient:
                 if not ready.done():
                     ready.set_result((definitions, routes))
                 logger.info("MCP 服务器 %s 工具发现完成，共 %d 个工具", name, len(definitions))
-                # 保持连接，直到 close 取消当前任务并触发上下文退出。
+                # 保持连接，直到 stop 取消当前任务并触发上下文退出。
                 await asyncio.Future()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -188,11 +169,11 @@ class MCPClient:
             logger.warning("MCP 工具 %s 调用失败：%s", name, error)
             return json.dumps({"isError": True, "error": f"MCP 调用失败：{error}"}, ensure_ascii=False)
 
-    async def close(self, initialization: asyncio.Task | None = None) -> None:
+    async def stop(self) -> None:
         """统一取消任务，等待 SDK 关闭 stdio 子进程或 HTTP 会话及客户端。"""
         # todo:这里有必要等待吗，直接关了也行？
         # cancel 仅请求停止；仍需 gather 等待上下文清理实际完成。
-        tasks = [*self.tasks] if initialization is None else [initialization, *self.tasks]
+        tasks = [*self.tasks]
         # 同时终止仍在握手或发现工具的任务，取消后由各任务自己的上下文负责关闭。
         for task in tasks:
             if not task.done():
