@@ -64,8 +64,7 @@ class AgentRuntime:
         self.approvals = ApprovalBroker(self.message_dispatcher)
         self.sessions: dict[str, SessionState] = {}
         self.default_session_id = ""
-        self.channels = ChannelManager(config, self.message_dispatcher)  # 与 Runtime 共享配置和消息分发器。
-        self.input_task: asyncio.Task | None = None  # 读取ChannelManager消息任务，记录任务引用stop时方便专门处理
+        self.channels = ChannelManager(config, self.message_dispatcher, self.submit)  # 共享配置和消息分发器，并传入提交回调。
         # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
         self.background_tasks: list[asyncio.Task] = []
 
@@ -89,23 +88,14 @@ class AgentRuntime:
         return state
 
     async def start(self) -> None:
-        """恢复会话，并发启动 MCP 与通道；异常由具体资源模块处理或向外抛出。"""
+        """恢复会话，先启动 MCP 再启动通道；异常由具体资源模块处理或向外抛出。"""
         entries = SessionStore.list_sessions(PROJECT_ROOT / SESSION_DIR_NAME)
         state = self._load(entries[0]["path"].stem) if entries else self._new()
         self.default_session_id = state.id
-        # MCP 连接和通道监听并发启动；完成后再读取输入。
-        await asyncio.gather(self.mcp.start(), self.channels.start())
-        self.input_task = asyncio.create_task(self._receive_inputs(), name="channel-inputs")
+        # 通道收到输入后立即提交，先准备 MCP，保证请求执行时工具已就绪。
+        await self.mcp.start()
+        await self.channels.start()
         logger.info("AgentRuntime 已启动：model=%s workdir=%s", self.config.model, self.config.workdir)
-
-    async def _receive_inputs(self) -> None:
-        """读取合并后的输入流，处理断线通知并提交消息。"""
-        async with aclosing(self.channels.receive()) as inputs:
-            async for event in inputs:
-                if isinstance(event, ChannelDisconnected):
-                    self.approvals.disconnect(event.channel_id, event.reply_target)
-                else:
-                    self.submit(event)
 
     async def _snapshot(self, message: InboundMessage, state: SessionState, title: str) -> None:
         """绑定本次回复的会话标识，补齐中断记录并发送历史快照。"""
@@ -194,8 +184,11 @@ class AgentRuntime:
             self.background_tasks.append(asyncio.create_task(
                 extract_memories(self.client, deepcopy(state.messages), self.config)))
 
-    def submit(self, message: InboundMessage) -> asyncio.Task | None:
-        """统一接收输入并启动异步请求；审批直接处理，不占用并发名额。"""
+    def submit(self, message: InboundMessage | ChannelDisconnected) -> asyncio.Task | None:
+        """统一接收输入和断线通知；普通输入创建任务，断线与审批直接处理。"""
+        if isinstance(message, ChannelDisconnected):
+            self.approvals.disconnect(message.channel_id, message.reply_target)
+            return None
         if message.input.startswith("/approve "):
             self.approvals.resolve(message)
             return None
@@ -224,13 +217,7 @@ class AgentRuntime:
             try:
                 await self.channels.stop()
             finally:
-                try:
-                    await self._drain()
-                finally:
-                    if self.input_task is not None:
-                        self.input_task.cancel()
-                        await asyncio.gather(self.input_task, return_exceptions=True)
-                        self.input_task = None
+                await self._drain()
         finally:
             try:
                 await self.mcp.stop()

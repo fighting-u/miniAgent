@@ -2,7 +2,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
+from typing import Any, Callable
 
 
 # 通道注册和输出分发使用的诊断日志。
@@ -28,18 +28,17 @@ class ChannelDisconnected:
     reply_target: str  # 已断开的连接或聊天目标。
 
 
+# 通道同步提交输入或断线通知；普通输入返回 Runtime 创建的请求任务。
+Submit = Callable[[InboundMessage | ChannelDisconnected], asyncio.Task | None]
+
+
 class Channel(ABC):
     """通道统一接口，不限定主动连接或被动监听。"""
 
-    def __init__(self, channel_id: str) -> None:
-        """保存实例标识及协议回调到异步迭代的接收缓冲。"""
+    def __init__(self, channel_id: str, submit: Submit) -> None:
+        """保存实例标识和提交回调，协议输入直接交给 Runtime 调度。"""
         self.channel_id = channel_id
-        self._incoming: asyncio.Queue[InboundMessage | ChannelDisconnected] = asyncio.Queue()  # 只缓冲协议输入，不调度 Agent。
-
-    async def receive(self) -> AsyncIterator[InboundMessage | ChannelDisconnected]:
-        """持续产出协议消息与断线通知，由 ChannelManager 合并读取。"""
-        while True:
-            yield await self._incoming.get()
+        self.submit = submit  # 只调用提交接口，不持有 Runtime 对象。
 
     @abstractmethod
     async def start(self) -> bool:
@@ -58,7 +57,7 @@ class MessageDispatcher:
     """按通道实例标识查找发送实现。"""
 
     def __init__(self) -> None:
-        """创建已就绪通道实例的注册表。"""
+        """创建通道实例的注册表，启动前注册以支持即时回复。"""
         self.channels: dict[str, Channel] = {}
 
     async def send(self, message: InboundMessage, event: dict[str, Any]) -> bool:

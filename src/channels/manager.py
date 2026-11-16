@@ -1,8 +1,7 @@
-import asyncio
 import logging
-from typing import Any, AsyncIterator
+from typing import Any
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage, MessageDispatcher
+from src.channels.base import Channel, MessageDispatcher, Submit
 from src.config import Config
 from src.channels.qq import QQChannel
 from src.channels.terminal import TerminalChannel
@@ -16,48 +15,32 @@ CHANNEL_TYPES: dict[str, type[Channel]] = {"terminal": TerminalChannel, "qq": QQ
 
 
 class ChannelManager:
-    """维护通道生命周期，并对外提供合并后的输入流。"""
+    """维护通道生命周期，创建实例时传入统一提交回调。"""
 
-    def __init__(self, config: Config, message_dispatcher: MessageDispatcher) -> None:
-        """保存共享配置与消息分发器，管理通道生命周期和输入合并。"""
+    def __init__(self, config: Config, message_dispatcher: MessageDispatcher, submit: Submit) -> None:
+        """保存共享配置、消息分发器与提交回调，管理通道生命周期。"""
         self.config = config
         self.message_dispatcher = message_dispatcher
-
-    async def receive(self) -> AsyncIterator[InboundMessage | ChannelDisconnected]:
-        """并发等待各通道的下一条输入，按到达情况合并产出。"""
-        # 每个通道只保留一个读取任务，任务生命周期限定在本次输入流内。
-        pending = {}
-        for channel in self.message_dispatcher.channels.values():
-            stream = channel.receive()
-            pending[asyncio.create_task(anext(stream))] = stream
-        # TODO：后续补充运行中增删通道的输入流同步，以及单个通道的读取异常隔离。
-        try:
-            while pending:
-                completed, _ = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                for task in completed:
-                    stream = pending.pop(task)
-                    try:
-                        event = task.result()
-                    except StopAsyncIteration:
-                        continue
-                    pending[asyncio.create_task(anext(stream))] = stream
-                    yield event
-        finally:
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        self.submit = submit  # 原样传给通道，不在管理器中处理请求。
 
     async def add(self, settings: dict[str, Any]) -> None:
-        """创建并启动一个实例，成功后才发布到分发表。"""
+        """启动前注册实例以支持即时回复，启动失败时移除注册。"""
         channel_id = settings["id"]
         if channel_id in self.message_dispatcher.channels:
             raise ValueError(f"通道实例已存在：{channel_id}")
         if settings["type"] not in CHANNEL_TYPES:
             raise ValueError(f"未知通道类型：{settings['type']}")
-        channel = CHANNEL_TYPES[settings["type"]](channel_id,
-                                                   **settings.get("options", {}))
-        if await channel.start():
-            self.message_dispatcher.channels[channel_id] = channel
+        channel = CHANNEL_TYPES[settings["type"]](channel_id, self.submit,
+                                                **settings.get("options", {}))
+        # 通道在 start 返回前就可能提交输入，先注册才能正确分发首条回复。
+        self.message_dispatcher.channels[channel_id] = channel
+        started = False
+        try:
+            started = await channel.start()
+        finally:
+            if not started:
+                del self.message_dispatcher.channels[channel_id]
+        if started:
             print(f"通道已就绪：{channel.channel_id} {getattr(channel, 'uri', '')}", flush=True)
 
     async def start(self) -> None:

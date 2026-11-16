@@ -13,11 +13,11 @@ miniAgent/
 │   ├── terminal.py             # python -m src.terminal 独立终端客户端
 │   ├── channels/               # 通道协议适配
 │   │   ├── base.py             # 统一输入、通道基类和 MessageDispatcher
-│   │   ├── manager.py          # 类型注册、实例生命周期与多通道输入流合并
+│   │   ├── manager.py          # 类型注册、实例生命周期与提交回调传递
 │   │   ├── terminal.py         # 常驻端 WebSocket 监听与回复发送
 │   │   └── qq.py               # QQ 官方鉴权、网关心跳与好友私聊收发
 │   ├── runtime/                # 常驻运行协调
-│   │   ├── runtime.py          # AgentRuntime：模型/MCP 生命周期、统一输入流读取、并发提交、会话和持久化
+│   │   ├── runtime.py          # AgentRuntime：模型/MCP 生命周期、输入直接提交、并发控制、会话和持久化
 │   │   └── permissions.py      # 审批等待和控制消息回传
 │   ├── agent/                  # Agent 主流程
 │   │   ├── core.py             # 对话循环、模型请求和工具调度

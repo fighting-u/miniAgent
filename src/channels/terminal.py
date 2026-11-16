@@ -6,7 +6,7 @@ from uuid import uuid4
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage
+from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit
 
 
 # 终端连接生命周期和协议错误的日志。
@@ -16,10 +16,10 @@ logger = logging.getLogger(__name__)
 class TerminalChannel(Channel):
     """常驻端的 WebSocket 监听器，终端界面在另一个进程运行。"""
 
-    def __init__(self, channel_id: str,
+    def __init__(self, channel_id: str, submit: Submit,
                  host: str = "127.0.0.1", port: int = 8765) -> None:
         """保存监听地址，连接标识仅由服务端生成。"""
-        super().__init__(channel_id)
+        super().__init__(channel_id, submit)
         self.host = host
         self.port = port
         self.server: Server | None = None
@@ -42,7 +42,7 @@ class TerminalChannel(Channel):
         return True
 
     async def _receive(self, connection: ServerConnection) -> None:
-        """解析 WebSocket 输入并写入接收缓冲，Runtime 通过 receive() 主动读取。"""
+        """解析 WebSocket 输入并直接提交，继续接收后续消息。"""
         target = uuid4().hex
         self.connections[target] = connection
         logger.info("终端连接已建立：%s/%s", self.channel_id, target)
@@ -55,7 +55,7 @@ class TerminalChannel(Channel):
                         raise ValueError("input 和 session_id 必须为文本")
                     message = InboundMessage(str(data.get("request_id") or uuid4().hex),
                                              self.channel_id, target, data.get("session_id", ""), text.strip())
-                    self._incoming.put_nowait(message)
+                    self.submit(message)
                 except (ValueError, KeyError, TypeError) as error:
                     logger.warning("终端输入无效：%s", error)
                     await self.send(target, {"type": "error", "text": f"输入未接受：{error}"})
@@ -64,7 +64,7 @@ class TerminalChannel(Channel):
             logger.info("终端连接已断开：%s/%s", self.channel_id, target)
         finally:
             self.connections.pop(target, None)
-            self._incoming.put_nowait(ChannelDisconnected(self.channel_id, target))
+            self.submit(ChannelDisconnected(self.channel_id, target))
 
     async def send(self, reply_target: str, event: dict[str, Any]) -> None:
         """将输出事件编码后发送给对应终端连接。"""

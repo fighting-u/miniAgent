@@ -12,7 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config import Config
-from src.channels.base import MessageDispatcher
+from src.channels.base import ChannelDisconnected, InboundMessage, MessageDispatcher
 from src.channels.manager import ChannelManager
 from tests.temp_workspace import temporary_workspace
 
@@ -26,7 +26,11 @@ async def check_connection() -> None:
         raise ValueError("请先在 config.yaml 中启用 QQ 通道")
     baseline = set(asyncio.all_tasks())
     message_dispatcher = MessageDispatcher()
-    manager = ChannelManager(config, message_dispatcher)
+
+    def submit(event: InboundMessage | ChannelDisconnected) -> None:
+        """仅验证连接，忽略输入及断线通知，不启动 Agent 请求。"""
+
+    manager = ChannelManager(config, message_dispatcher, submit)
     with temporary_workspace("miniagent-qq-") as root:
         # 日志只保存在本次临时目录，不输出请求头或原始平台响应。
         handler = logging.FileHandler(root / "connection.log", encoding="utf-8")

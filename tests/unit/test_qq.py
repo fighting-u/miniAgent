@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from websockets.asyncio.server import serve
 
-from src.channels.base import ChannelDisconnected, MessageDispatcher
+from src.channels.base import ChannelDisconnected, InboundMessage, MessageDispatcher
 from src.channels.qq import QQChannel
 from src.runtime.permissions import ApprovalBroker
 from src.config import Config
@@ -33,8 +33,7 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         self.broker = ApprovalBroker(self.message_dispatcher)
         self.inputs = []  # 记录通道提交的普通输入。
         self.received = asyncio.Event()  # 等待模拟网关实际提交消息。
-        self.listener = None  # 模拟 Runtime 对通道输入流的读取任务。
-        self.channel = QQChannel("qq_test", startup_timeout=1)
+        self.channel = QQChannel("qq_test", self.submit, startup_timeout=1)
         self.identify = None
         self.heartbeat_sequences = []  # 确认首次心跳使用 READY 的序号，而非鉴权前的空序号。
         self.socket = None
@@ -50,16 +49,15 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.login_patch.stop)
         self.addAsyncCleanup(self.close)
 
-    async def listen(self) -> None:
-        """模拟 Runtime 主动读取输入流，审批立即分发，其余输入供断言使用。"""
-        async for event in self.channel.receive():
-            if isinstance(event, ChannelDisconnected):
-                self.broker.disconnect(event.channel_id, event.reply_target)
-            elif event.input.startswith("/approve "):
-                self.broker.resolve(event)
-            else:
-                self.inputs.append(event)
-            self.received.set()
+    def submit(self, event: InboundMessage | ChannelDisconnected) -> None:
+        """模拟 Runtime 提交回调，审批立即分发，其余输入供断言使用。"""
+        if isinstance(event, ChannelDisconnected):
+            self.broker.disconnect(event.channel_id, event.reply_target)
+        elif event.input.startswith("/approve "):
+            self.broker.resolve(event)
+        else:
+            self.inputs.append(event)
+        self.received.set()
 
     async def login(self) -> None:
         """替换鉴权网络，保留真实网关读写与心跳实现。"""
@@ -68,8 +66,6 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
 
     async def close(self) -> None:
         """无论断言结果如何，关闭通道、WebSocket 监听和全部连接。"""
-        if self.listener is not None:
-            await self.cancel_task(self.listener)
         await self.channel.stop()
         self.server.close()
         await self.server.wait_closed()
@@ -92,7 +88,6 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         await self.channel.start()
         await asyncio.wait_for(self.channel.heartbeat_ack.wait(), 2)
         self.message_dispatcher.channels[self.channel.channel_id] = self.channel
-        self.listener = asyncio.create_task(self.listen())
 
     async def receive(self, msg_id: str, text: str) -> None:
         """直接注入平台私聊载荷，验证统一提交入口。"""
@@ -160,7 +155,7 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(task, return_exceptions=True)
 
     async def runtime_receive(self, msg_id: str, text: str) -> None:
-        """等待真实 Runtime 读取输入并完成该条消息的回复。"""
+        """等待真实 Runtime 处理直接提交的输入并完成该条消息的回复。"""
         await self.channel._receive({"id": msg_id, "content": text, "author": {"user_openid": "user-a"}})
 
         async def wait_reply() -> None:
@@ -183,6 +178,7 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
             patches.enter_context(patch.object(runtime_module, "extract_memories", new=AsyncMock(return_value=0)))
             runtime = AgentRuntime(config)
             runtime.message_dispatcher.channels[self.channel.channel_id] = self.channel
+            self.channel.submit = runtime.submit
             self.channel.api = self.api
             await runtime.start()
             try:

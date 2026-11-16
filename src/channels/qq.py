@@ -7,7 +7,7 @@ from typing import Any
 
 from websockets.asyncio.client import connect
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage
+from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit
 
 
 # QQ 鉴权、网关生命周期和私聊消息转换的诊断日志；不记录凭据和请求头。
@@ -27,11 +27,11 @@ class QQReply:
 class QQChannel(Channel):
     """连接 QQ 官方网关，只处理 QQ 好友私聊，不接收群聊或频道消息。"""
 
-    def __init__(self, channel_id: str,
+    def __init__(self, channel_id: str, submit: Submit,
                  app_id: str = "", secret: str = "",
                  is_sandbox: bool = False, startup_timeout: float = 45) -> None:
         """接收 Config 已解析的凭据；SDK 负责鉴权与 REST，通道管理网关任务。"""
-        super().__init__(channel_id)
+        super().__init__(channel_id, submit)
         self.app_id = app_id
         self.secret = secret
         self.is_sandbox = is_sandbox
@@ -40,7 +40,7 @@ class QQChannel(Channel):
         self.api: Any = None  # SDK 消息发送与网关地址查询接口。
         self.robot: dict[str, Any] = {}  # 平台返回的机器人资料，不包含密钥。
         self.task: asyncio.Task | None = None  # 本通道唯一网关连接及重连任务。
-        self.ready = asyncio.Event()  # 首次收到 READY 后才允许注册通道。
+        self.ready = asyncio.Event()  # 首次收到 READY 后才视为启动成功。
         self.heartbeat_ack = asyncio.Event()  # 最近一次心跳确认，供连接测试验证。
         self.connected = False  # 当前网关是否完成鉴权。
         self.replies: dict[str, QQReply] = {}  # 请求关联原始 QQ 消息，done 后释放。
@@ -170,7 +170,7 @@ class QQChannel(Channel):
         logger.warning("QQ 网关连接已关闭：%s", self.channel_id)
 
     async def _receive(self, data: dict[str, Any]) -> None:
-        """将好友文本写入接收缓冲，网关继续接收后续消息。"""
+        """将好友文本直接提交，网关继续接收后续消息。"""
         target = data.get("author", {}).get("user_openid")
         msg_id = data.get("id")
         text = data.get("content", "").strip()
@@ -181,14 +181,14 @@ class QQChannel(Channel):
         # QQ 跟随 Runtime 的共享当前会话，不创建用户、通道或记忆隔离。
         message = InboundMessage(request_id, self.channel_id, target, "", text)
         if text.startswith("/approve "):
-            self._incoming.put_nowait(message)
+            self.submit(message)
             return
         if request_id in self.replies:
             logger.info("忽略正在处理的重复 QQ 消息：%s", request_id)
             return
         reply = QQReply(target, msg_id)
         self.replies[request_id] = reply
-        self._incoming.put_nowait(message)
+        self.submit(message)
 
     async def _send_text(self, reply: QQReply, text: str) -> None:
         """通过 SDK 发送被动纯文本回复，递增同一原始消息的发送序号。"""
@@ -233,7 +233,7 @@ class QQChannel(Channel):
                 self.replies.pop(event["request_id"], None)
 
     async def stop(self) -> None:
-        """取消并等待网关与心跳、产出断线通知、关闭 SDK HTTP 连接。"""
+        """取消并等待网关与心跳、提交断线通知、关闭 SDK HTTP 连接。"""
         if self.task is not None:
             self.task.cancel()
             with suppress(asyncio.CancelledError, Exception):
@@ -241,7 +241,7 @@ class QQChannel(Channel):
             self.task = None
         self.connected = False
         for target in {reply.target for reply in self.replies.values()}:
-            self._incoming.put_nowait(ChannelDisconnected(self.channel_id, target))
+            self.submit(ChannelDisconnected(self.channel_id, target))
         self.replies.clear()
         if self.http is not None:
             await self.http.close()

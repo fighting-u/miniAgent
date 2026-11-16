@@ -37,7 +37,7 @@ mcp_servers:
 
 ## 其他细节
 
-- **初始化**：AgentRuntime 使用 asyncio.gather 并发等待 MCPManager.start() 与 ChannelManager.start()。MCPManager 完成连接、工具发现和路由注册，再调用 assemble_tools 组装完整列表。通道可提前接收输入，请求由 Runtime 等待整体启动完成后执行；agent_loop 不再接收或等待初始化任务。后续对话复用连接，不动态刷新。
+- **初始化**：AgentRuntime 先等待 MCPManager.start()，再启动 ChannelManager。MCPManager 完成连接、工具发现和路由注册，再调用 assemble_tools 组装完整列表；通道开始接收时，工具已经准备完成，可以直接调用 submit 提交输入。agent_loop 不接收或等待初始化任务。后续对话复用连接，不动态刷新。
 - **命名与调用**：工具名为 `mcp__服务器名__原工具名`，内部映射到对应连接和原名。服务器名和工具名统一通过修正方法处理，仅保留英文字母、数字、下划线和短横线，其余字符逐个替换为 `_`；完整工具名最长 64 字符，超长截断。修正后重名的服务器只取第一项；YAML 原始键按解析器默认规则处理，应避免同名键。不同服务器的同名工具可以共存；完整工具名冲突仍记录并跳过该服务器的工具。调用统一经过现有 Hook。
 - **结果**：保留文本、结构化结果和错误标记，序列化后通过 `function_call_output` 返回，保持原 `call_id`。暂不处理图片等多模态结果。
 - **超时与兜底**：HTTP 建连、初始化与工具发现阶段、单次 MCP 请求均限时 30 秒。HTTP 首次初始化最多尝试 3 次（含首次），每次失败先关闭本次连接，全部失败则记录并跳过该服务器；不影响其他工具。工具发布后不自动重连，工具调用不自动重试。
@@ -51,7 +51,7 @@ mcp_servers:
 | `config.yaml`、`src/config.py` | mcp_servers 配置服务器启动参数或 HTTP 地址、请求头，由 Config 集中解析。 |
 | `src/tools/mcp_manager.py` | 从 config.mcp_servers 取得配置，管理连接、发现工具、维护路由并执行调用。 |
 | `src/tools/tools.py` | `assemble_tools` 合并本地与 MCP 工具，由 MCPManager.start() 调用。 |
-| `src/runtime/runtime.py`、`src/agent/core.py` | AgentRuntime 并发启动 MCP 与通道，整体就绪后放行请求，退出时负责关闭；Agent 只使用已准备好的工具列表及调用路由。 |
+| `src/runtime/runtime.py`、`src/agent/core.py` | AgentRuntime 先启动 MCP 再启动通道，退出时负责关闭；Agent 只使用已准备好的工具列表及调用路由。 |
 | `pyproject.toml` | 声明 MCP SDK 依赖。 |
 | `README.md` | 项目文件结构与配置说明。 |
 | `tests/integration/live_mcp.py` | 真实 stdio 服务与 LLM 单次工具调用测试。 |
@@ -72,4 +72,4 @@ mcp_servers:
 
 本轮统一配置重构已适配测试入口，仅做静态检查，以下历史真实测试结果不代表本轮已重新验证。
 
-本轮 MCPManager 生命周期与并发启动重构仅做静态检查，测试入口已同步，未运行测试或真实连接验证。
+本轮通道直接提交改造将启动顺序调整为先 MCP、后通道，仅做静态检查，测试入口已同步，未运行测试或真实连接验证。
