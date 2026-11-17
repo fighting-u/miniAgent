@@ -24,6 +24,7 @@ class Config:
     workdir: Path = PROJECT_ROOT  # 文件工具和 PowerShell 使用的工作区。
     extra_allowed_dirs: tuple[Path, ...] = ()  # 工作区之外额外允许访问的目录。
     max_concurrent_requests: int = 10  # 同时处理请求的最大数量。
+    session_owner_ttl: int = 60  # 当前轮执行结束后，原来源继续占用的秒数。
     powershell_timeout: int = 120  # PowerShell 工具的单次执行秒数。
     channels: list[dict[str, Any]] = field(default_factory=list, repr=False)  # 通道实例配置，解析后可能包含密钥。
     mcp_servers: dict[str, Any] = field(default_factory=dict, repr=False)  # MCP 服务器配置，可能包含认证信息。
@@ -47,6 +48,8 @@ class Config:
                                           for value in config.extra_allowed_dirs)
         if type(config.max_concurrent_requests) is not int or config.max_concurrent_requests <= 0:
             raise ValueError("max_concurrent_requests 必须为正整数")
+        if type(config.session_owner_ttl) is not int or config.session_owner_ttl < 0:
+            raise ValueError("session_owner_ttl 必须为非负整数")
         if type(config.powershell_timeout) is not int or config.powershell_timeout <= 0:
             raise ValueError("powershell_timeout 必须为正整数")
         if not isinstance(config.model, str) or not isinstance(config.api_key_env, str):

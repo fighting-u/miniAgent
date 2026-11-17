@@ -19,6 +19,8 @@ extra_allowed_dirs:
 
 # AgentRuntime 同时处理请求的最大数量。
 max_concurrent_requests: 10
+# 会话执行结束后，原来源继续占用的秒数；0 表示结束后立即允许其他来源接管。
+session_owner_ttl: 60
 
 # 通道channel相关配置
 # id 标识每个实例，type 表示tunnel类型，enabled 控制启动。

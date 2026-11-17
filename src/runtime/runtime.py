@@ -13,7 +13,7 @@ from src.channels.manager import ChannelManager
 from src.config import Config, PROJECT_ROOT
 from src.memory.memory import extract_memories
 from src.runtime.permissions import ApprovalBroker
-from src.session.session import Session
+from src.session.session import Session, get_owner_id
 from src.session.session_manager import SessionManager, serializable
 from src.session.storage import SESSION_DIR_NAME
 from src.tools.mcp_manager import MCPManager
@@ -40,7 +40,7 @@ class AgentRuntime:
         self.message_dispatcher = MessageDispatcher()
         # todo: ?
         self.approvals = ApprovalBroker(self.message_dispatcher)
-        self.session_manager = SessionManager(PROJECT_ROOT / SESSION_DIR_NAME)  # 管理会话历史、存储和入口绑定。
+        self.session_manager = SessionManager(PROJECT_ROOT / SESSION_DIR_NAME, config)  # 管理会话历史、存储和入口绑定。
         self.channels = ChannelManager(config, self.message_dispatcher, self.submit, self.session_manager)  # 共享配置和消息分发器，并传入提交回调。
         # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
         self.background_tasks: list[asyncio.Task] = []
@@ -122,7 +122,7 @@ class AgentRuntime:
             await self.message_dispatcher.send(message, event)
 
     async def _run_turn(self, message: InboundMessage) -> None:
-        """用户输入已落盘，由调用方持有会话锁执行 Agent 并消费事件。"""
+        """用户输入已落盘，由调用方取得会话占用后执行 Agent 并消费事件。"""
         session = self.session_manager.get(message.session_id)
         # todo：传那么多参数，是否会太乱以及不易维护？配置集中传入，资源由本运行时管理。
         try:
@@ -145,7 +145,7 @@ class AgentRuntime:
         task.add_done_callback(self.requests.pop)
 
     async def _process_message(self, message: InboundMessage | ChannelDisconnected) -> None:
-        """按输入类型分发；断线和审批答复在等待并发名额前处理。"""
+        """按输入类型分发；断线、审批答复和会话占用判断先于并发名额等待。"""
         if isinstance(message, ChannelDisconnected):
             self.approvals.disconnect(message.channel_id, message.reply_target)
             return
@@ -153,28 +153,36 @@ class AgentRuntime:
             self.approvals.resolve(message)
             return
         try:
+            # todo: 优化太多If,else
             if message.type == InboundType.GET_HISTORY:
                 await self._history(message)
             elif message.type == InboundType.LIST_SESSIONS:
                 await self._list_sessions(message)
-            else:
+            elif message.type == InboundType.COMMAND:
                 async with self.limit:
-                    if message.type == InboundType.COMMAND:
-                        await self._command(message)
-                    elif message.input:
-                        # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
-                        # 按内存、磁盘、新建的顺序取得会话，/new 的标识到这里才创建对象。
-                        session = self.session_manager.get_or_create(message.session_id)
-                        if not message.session_id:
-                            message.session_id = session.id
-                            # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
-                            await self.message_dispatcher.send(message, {"type": "session_created"})
-                        # 会话锁覆盖用户输入落盘、生成器迭代和上下文修改。
-                        async with session.lock:
-                            trigger_hooks("PreUserPromptSubmit", self.config)
-                            self.session_manager.start_turn(session, message.input)
-                            self.session_manager.bind(message.channel_id, session.id)
-                            await self._run_turn(message)
+                    await self._command(message)
+            elif message.input:
+                # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
+                # 按内存、磁盘、新建的顺序取得会话，/new 的标识到这里才创建对象。
+                session = self.session_manager.get_or_create(message.session_id)
+                requester_id = get_owner_id(message.channel_id, message.reply_target)
+                if not self.session_manager.try_acquire_session_lock(session, requester_id):
+                    logger.warning("会话占用冲突：session_id =%s 请求人=%s 会话当前的owner=%s",
+                                   session.id, requester_id, session.owner_id)
+                    await self.message_dispatcher.send(message, {
+                        "type": "error", "text": f"该会话已被 {session.owner_id} 占用，请稍后再试。",
+                    })
+                    return
+                if not message.session_id:
+                    message.session_id = session.id
+                    # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
+                    await self.message_dispatcher.send(message, {"type": "session_created"})
+                async with self.limit:
+                    trigger_hooks("PreUserPromptSubmit", self.config)
+                    self.session_manager.start_turn(session, message.input)
+                    self.session_manager.bind(message.channel_id, session.id)
+                    await self._run_turn(message)
+                    self.session_manager.release_session_lock(session)
         except Exception as error:
             logger.exception("请求处理失败：request=%s session=%s", message.request_id, message.session_id)
             await self.message_dispatcher.send(message, {"type": "error", "text": str(error)})
