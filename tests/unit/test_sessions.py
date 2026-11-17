@@ -22,7 +22,8 @@ from src.config import Config
 from src.agent import core
 from src.tools import tools
 from src.context.context_compactor import ContextCompactor
-from src.session.session_store import API_FORMAT, SessionStore, omit_none
+from src.session import storage
+from src.session.storage import API_FORMAT, omit_none
 
 
 def assistant_message(text: str) -> dict:
@@ -56,7 +57,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.root = Path(self.stack.enter_context(temporary_workspace("miniagent-session-")))
-        self.session = SessionStore.create(self.root / "sessions")
+        self.session = storage.create(self.root / "sessions")
         self.config = Config(model="session-test-model", workdir=self.root)
         self.stack.enter_context(patch.object(core, "load_memories", return_value=""))
         self.stack.enter_context(patch.object(core, "build_system_prompt", return_value="只进行简短测试。"))
@@ -98,25 +99,26 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             async for event in events:
                 if event["type"] == "items":
                     for item in event["items"]:
-                        session.append(item, model_name=event.get("model_name"))
+                        storage.append(session, item, model_name=event.get("model_name"))
 
     def test_path_uuid_and_roundtrip(self) -> None:
         """验证 UUIDv7、日期路径、SDK 别名及四类记录的无损有效内容恢复。"""
         self.assertEqual(UUID(self.session.path.stem).version, 7)
         self.assertEqual(self.session.path.parent.relative_to(self.root / "sessions").as_posix(),
                          datetime.now().astimezone().strftime("%Y/%m/%d"))
-        user = self.session.start_turn("你好，保存中文。")
+        user = storage.start_turn(self.session, "你好，保存中文。")
         reasoning = ResponseReasoningItem(id="rs_1", type="reasoning", summary=[])
         call = ResponseFunctionToolCall(
             id="fc_1", type="function_call", call_id="call_1", name="read_file",
             arguments='{"path": "说明.txt", "extra": null}', **{"async": False},
         )
-        self.session.append(reasoning, model_name="test-model")
-        self.session.append(call, model_name="test-model")
-        self.session.append({"type": "function_call_output", "call_id": "call_1", "output": ""})
-        self.session.append(assistant_message("已保存。"), model_name="test-model")
+        storage.append(self.session, reasoning, model_name="test-model")
+        storage.append(self.session, call, model_name="test-model")
+        storage.append(self.session, {"type": "function_call_output", "call_id": "call_1", "output": ""})
+        storage.append(self.session, assistant_message("已保存。"), model_name="test-model")
         original_bytes = self.session.path.read_bytes()
-        restored, history = SessionStore.load(self.session.path)
+        restored = storage.load(self.session.path)
+        history = restored.messages
         self.assertEqual(restored.path, self.session.path)
         self.assertEqual(restored.ordinal, 5)
         self.assertEqual(restored.turn_id, 0)
@@ -137,7 +139,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows[index]["payload"]["metadata"], {"api_format": API_FORMAT})
         self.assertNotIn("logprobs", rows[4]["payload"]["content"][0])
         self.assertNotIn("encrypted_content", rows[1]["payload"])
-        restored.start_turn("继续。")
+        storage.start_turn(restored, "继续。")
         self.assertTrue(self.session.path.read_bytes().startswith(original_bytes))
         self.assertEqual(self.records()[-1]["ordinal"], 5)
         self.assertEqual(self.records()[-1]["turn_id"], 1)
@@ -163,7 +165,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
             [assistant_message("口令是青松42。")],
             [assistant_message("上次的口令仍是青松42。")],
         ], requests)
-        history = [self.session.start_turn("读取文件并查找 txt 文件。")]
+        history = [storage.start_turn(self.session, "读取文件并查找 txt 文件。")]
         await self.run_agent(client, history, "读取文件并查找 txt 文件。", session=self.session)
         prefix = self.session.path.read_bytes()
         rows = self.records()
@@ -175,10 +177,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[5]["payload"]["output"], "note.txt")
         self.assertEqual(rows[2]["payload"]["call_id"], rows[4]["payload"]["call_id"])
         self.assertEqual(rows[3]["payload"]["call_id"], rows[5]["payload"]["call_id"])
-        resumed, history = SessionStore.load(self.session.path)
+        resumed = storage.load(self.session.path)
+        history = resumed.messages
         old_history = deepcopy(history)
         question = "上次的口令是什么？"
-        history.append(resumed.start_turn(question))
+        history.append(storage.start_turn(resumed, question))
         await self.run_agent(client, history, question, session=resumed)
         self.assertEqual(requests[-1]["input"][:-1], old_history)
         self.assertNotIn("metadata", json.dumps(requests[-1]["input"]))
@@ -203,31 +206,32 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("模拟工具执行中断")
             return "首个结果"
 
-        history = [self.session.start_turn("读取两个文件。")]
+        history = [storage.start_turn(self.session, "读取两个文件。")]
         with patch.object(tools, "run_read", interrupted_read):
             with self.assertRaisesRegex(RuntimeError, "模拟工具执行中断"):
                 await self.run_agent(client, history, "读取两个文件。", session=self.session)
         self.assertEqual(self.records()[-1]["payload"]["call_id"], "done")
-        resumed, history = SessionStore.load(self.session.path)
+        resumed = storage.load(self.session.path)
+        history = resumed.messages
         self.assertEqual(list(resumed.pending_calls), ["pending"])
-        history.extend(resumed.recover_pending_tools())
+        history.extend(storage.recover_pending_tools(resumed))
         self.assertIn("无法确认", history[-1]["output"])
-        self.assertEqual(resumed.recover_pending_tools(), [])
-        history.append(resumed.start_turn("继续问候即可。"))
+        self.assertEqual(storage.recover_pending_tools(resumed), [])
+        history.append(storage.start_turn(resumed, "继续问候即可。"))
         await self.run_agent(client, history, "继续问候即可。", session=resumed)
         self.assertEqual(executed, ["first", "second"])
-        SessionStore.load(self.session.path)
+        storage.load(self.session.path)
 
     async def test_invalid_arguments_and_blocked_results_are_saved(self) -> None:
         """无效参数与权限拦截也必须产生可配对、可恢复的结果记录。"""
         for blocked in (False, True):
             with self.subTest(blocked=blocked):
-                self.session = SessionStore.create(self.root / "sessions")
+                self.session = storage.create(self.root / "sessions")
                 requests = []
                 client = self.client([[
                     function_call("call_1", "read_file", '{}' if blocked else '{bad json'),
                 ], [assistant_message("已收到工具反馈。")]], requests)
-                history = [self.session.start_turn("简单工具测试。")]
+                history = [storage.start_turn(self.session, "简单工具测试。")]
 
                 def hook_result(event: str, *args):
                     """仅在执行前拦截，Stop Hook 仍返回 None，避免意外续跑。"""
@@ -238,11 +242,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 result = self.records()[2]["payload"]
                 self.assertEqual(result["call_id"], "call_1")
                 self.assertIn("权限被拒绝" if blocked else "工具参数无效", result["output"])
-                SessionStore.load(self.session.path)
+                storage.load(self.session.path)
 
     def test_corrupt_or_unsupported_files_fail_without_rewriting(self) -> None:
         """损坏尾行、错误序号和未实现的 compact 明确拒绝，保留原文件。"""
-        self.session.start_turn("你好。")
+        storage.start_turn(self.session, "你好。")
         original = self.records()[0]
         for kind in ("ordinal", "turn_id", "compact", "partial", "newline", "api_format", "orphan"):
             with self.subTest(kind=kind):
@@ -266,7 +270,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.session.path.write_text(text, encoding="utf-8")
                 before = self.session.path.read_bytes()
                 with self.assertRaisesRegex(ValueError, "会话文件第"):
-                    SessionStore.load(self.session.path)
+                    storage.load(self.session.path)
                 self.assertEqual(self.session.path.read_bytes(), before)
 
 

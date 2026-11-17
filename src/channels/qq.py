@@ -7,7 +7,7 @@ from typing import Any
 
 from websockets.asyncio.client import connect
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit
+from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit, input_type
 
 
 # QQ 鉴权、网关生命周期和私聊消息转换的诊断日志；不记录凭据和请求头。
@@ -29,9 +29,10 @@ class QQChannel(Channel):
 
     def __init__(self, channel_id: str, submit: Submit,
                  app_id: str = "", secret: str = "",
-                 is_sandbox: bool = False, startup_timeout: float = 45) -> None:
+                 is_sandbox: bool = False, startup_timeout: float = 45, session_id: str = "") -> None:
         """接收 Config 已解析的凭据；SDK 负责鉴权与 REST，通道管理网关任务。"""
         super().__init__(channel_id, submit)
+        self.session_id = session_id  # 启动时恢复该通道的绑定，后续由明确的 session 事件更新。
         self.app_id = app_id
         self.secret = secret
         self.is_sandbox = is_sandbox
@@ -178,8 +179,8 @@ class QQChannel(Channel):
             logger.info("忽略非文本或不完整的 QQ 私聊消息：%s", self.channel_id)
             return
         request_id = f"{self.channel_id}:{msg_id}"
-        # QQ 跟随 Runtime 的共享当前会话，不创建用户、通道或记忆隔离。
-        message = InboundMessage(request_id, self.channel_id, target, "", text)
+        # 当前实例携带自己的会话选择，历史和长期记忆仍可与其他入口共用。
+        message = InboundMessage(request_id, self.channel_id, target, self.session_id, text, input_type(text))
         if text.startswith("/approve "):
             self.submit(message)
             return
@@ -206,7 +207,10 @@ class QQChannel(Channel):
         if reply.target != reply_target:
             raise ValueError("QQ 回复目标与原始消息不匹配")
         kind = event["type"]
-        if kind == "items":
+        if kind == "session_created":
+            # 首次创建只保存 ID，不发送 QQ 提示或回显用户消息。
+            self.session_id = event["session_id"]
+        elif kind == "items":
             for item in event["items"]:
                 if item.get("role") == "assistant" and item.get("type") == "message":
                     for part in item.get("content", []):
@@ -214,6 +218,7 @@ class QQChannel(Channel):
                         if text:
                             reply.texts.append(text)
         elif kind == "session":
+            self.session_id = event["session_id"]
             await self._send_text(reply, f"{event['title']}：{event['session_id']}")
         elif kind == "sessions":
             entries = event["sessions"]

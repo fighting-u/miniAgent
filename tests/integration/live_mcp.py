@@ -23,7 +23,7 @@ from src.agent import core
 from src.context.context_compactor import ContextCompactor
 from src.tools.mcp_manager import MCPManager
 from src.memory.memory import message_text
-from src.session.session_store import SessionStore
+from src.session import storage
 
 
 # 临时真实 MCP 服务源码：只提供一个工具，执行次数和进程号写入临时目录。
@@ -80,9 +80,9 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
             pid = int((root / "server.pid").read_text(encoding="utf-8"))
             handle = kernel.OpenProcess(0x100001, False, pid)
             assert handle, "无法取得测试进程句柄"
-        session = SessionStore.create(root / "sessions")
+        session = storage.create(root / "sessions")
         question = "请调用测试工具获取口令，然后只回复得到的口令。"
-        messages = [session.start_turn(question)]
+        messages = [storage.start_turn(session, question)]
         async with AsyncOpenAI(api_key=config.api_key, base_url=config.base_url,
                                timeout=60, max_retries=0) as client:
             original_create = client.responses.create
@@ -115,7 +115,7 @@ async def run_test(root: Path, server_settings: dict | None = None) -> None:
                     async for event in events:
                         if event["type"] == "items":
                             for item in event["items"]:
-                                session.append(item, model_name=event.get("model_name"))
+                                storage.append(session, item, model_name=event.get("model_name"))
             assert requests == 2, "主模型请求次数错误"
         calls = [item for item in messages if getattr(item, "type", None) == "function_call"]
         outputs = [item for item in messages if isinstance(item, dict) and item.get("type") == "function_call_output"]

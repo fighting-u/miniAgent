@@ -5,6 +5,7 @@ from src.channels.base import Channel, MessageDispatcher, Submit
 from src.config import Config
 from src.channels.qq import QQChannel
 from src.channels.terminal import TerminalChannel
+from src.session.session_manager import SessionManager
 
 
 # 通道配置与实例启动的诊断日志。
@@ -17,21 +18,26 @@ CHANNEL_TYPES: dict[str, type[Channel]] = {"terminal": TerminalChannel, "qq": QQ
 class ChannelManager:
     """维护通道生命周期，创建实例时传入统一提交回调。"""
 
-    def __init__(self, config: Config, message_dispatcher: MessageDispatcher, submit: Submit) -> None:
+    def __init__(self, config: Config, message_dispatcher: MessageDispatcher, submit: Submit,
+                 session_manager: SessionManager) -> None:
         """保存共享配置、消息分发器与提交回调，管理通道生命周期。"""
         self.config = config
         self.message_dispatcher = message_dispatcher
         self.submit = submit  # 原样传给通道，不在管理器中处理请求。
+        self.session_manager = session_manager  # 创建 QQ 实例时注入该入口持久化的会话选择。
 
     async def add(self, settings: dict[str, Any]) -> None:
         """启动前注册实例以支持即时回复，启动失败时移除注册。"""
         channel_id = settings["id"]
+        # 去重,避免配置文件重复,AI就喜欢这种很特殊的异常处理,但确实也有些道理
         if channel_id in self.message_dispatcher.channels:
             raise ValueError(f"通道实例已存在：{channel_id}")
         if settings["type"] not in CHANNEL_TYPES:
             raise ValueError(f"未知通道类型：{settings['type']}")
-        channel = CHANNEL_TYPES[settings["type"]](channel_id, self.submit,
-                                                **settings.get("options", {}))
+        options = dict(settings.get("options", {}))
+        if settings["type"] == "qq":
+            options["session_id"] = self.session_manager.get_binding(channel_id)
+        channel = CHANNEL_TYPES[settings["type"]](channel_id, self.submit, **options)
         # 通道在 start 返回前就可能提交输入，先注册才能正确分发首条回复。
         self.message_dispatcher.channels[channel_id] = channel
         started = False

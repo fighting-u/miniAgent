@@ -9,10 +9,12 @@ from openai import AsyncOpenAI
 from websockets.asyncio.client import connect
 
 from src.agent import core
+from src.channels.base import InboundType, input_type
 from src.config import Config
 from src.runtime import runtime as runtime_module
 from src.runtime.runtime import AgentRuntime
-from src.session.session_store import SessionStore, omit_none
+from src.session import storage
+from src.session.storage import omit_none
 from src.terminal import TerminalClient
 from src.tools import tools
 from tests.temp_workspace import temporary_workspace
@@ -94,9 +96,11 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         """无论断言是否通过都回收监听器、连接、请求和后台任务。"""
         await self.runtime.stop()
 
-    async def exchange(self, socket, text: str, session_id: str = "") -> list[dict]:
+    async def exchange(self, socket, text: str = "", session_id: str = "",
+                       request_type: InboundType | None = None) -> list[dict]:
         """从真实协议收集一次请求的完整事件。"""
-        await socket.send(json.dumps({"input": text, "session_id": session_id}))
+        await socket.send(json.dumps({"input": text, "session_id": session_id,
+                                      "type": request_type if request_type is not None else input_type(text)}))
         events = []
         while True:
             event = json.loads(await asyncio.wait_for(socket.recv(), 10))
@@ -117,7 +121,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         def verify_recorded_before_read(path: str, *, config) -> str:
             """真实工具开始前，整批调用必须已经持久化。"""
             files = list((self.root / "sessions").rglob("*.jsonl"))
-            store, _ = SessionStore.load(files[0])
+            store = storage.load(files[0])
             self.assertEqual(set(store.pending_calls), {"read", "glob", "plan"})
             return original_read(path, config=config)
 
@@ -132,11 +136,12 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         path = next((self.root / "sessions").rglob("*.jsonl"))
         prefix = path.read_bytes()
         async with connect(self.url, proxy=None) as socket:
-            events = await self.exchange(socket, "/attach", terminal.session_id)
-            snapshot = next(event for event in events if event["type"] == "session")
+            events = await self.exchange(socket, session_id=terminal.session_id, request_type=InboundType.GET_HISTORY)
+            snapshot = next(event for event in events if event["type"] == "session_history")
             self.assertIn("青松42", json.dumps(snapshot, ensure_ascii=False))
             await self.exchange(socket, "继续回忆口令", terminal.session_id)
-        store, history = SessionStore.load(path)
+        store = storage.load(path)
+        history = store.messages
         self.assertTrue(path.read_bytes().startswith(prefix))
         self.assertEqual(store.turn_id, 1)
         self.assertFalse(store.pending_calls)
@@ -169,7 +174,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         terminal = TerminalClient(self.url, ui)
         async with connect(self.url, proxy=None) as socket:
             terminal.connection = socket
-            await terminal.request("/attach")
+            await terminal.request(request_type=InboundType.GET_HISTORY)
             with patch.object(tools, "run_powershell", command):
                 await asyncio.wait_for(terminal.request("需要批准"), 10)
                 ui.allow = False
@@ -182,7 +187,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         """两个连接共用历史，恢复和删除命令通过服务端处理。"""
         self.outputs.extend([[assistant_message("第一会话")], [assistant_message("第二会话")]])
         async with connect(self.url, proxy=None) as first, connect(self.url, proxy=None) as second:
-            events = await self.exchange(first, "/attach")
+            events = await self.exchange(first, "/new")
             session_id = events[-1]["session_id"]
             await self.exchange(first, "第一条", session_id)
             snapshot = await self.exchange(second, "/resume " + session_id)
@@ -192,7 +197,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
             await self.exchange(second, "第二条", other)
             await self.exchange(first, "/resume " + session_id, session_id)
             async with connect(self.url, proxy=None) as reconnected:
-                attached = await self.exchange(reconnected, "/attach")
+                attached = await self.exchange(reconnected, request_type=InboundType.GET_HISTORY)
                 self.assertEqual(attached[-1]["session_id"], session_id)
             listing = await self.exchange(first, "/resume", session_id)
             self.assertEqual(len(next(e for e in listing if e["type"] == "sessions")["sessions"]), 2)
@@ -203,7 +208,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_persistence_failure_stops_tool_execution(self) -> None:
         """调用记录落盘失败时关闭生成器，工具不能产生副作用。"""
         self.outputs.extend([[function_call("blocked", "get_current_time", "{}")]])
-        original = SessionStore.append
+        original = storage.append
 
         def fail_call(store, item, model_name=None):
             """只模拟工具调用记录写入失败，用户输入仍正常保存。"""
@@ -213,13 +218,13 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
         executed = []
         async with connect(self.url, proxy=None) as socket:
-            attached = await self.exchange(socket, "/attach")
-            with patch.object(SessionStore, "append", fail_call), patch.object(
+            attached = await self.exchange(socket, "/new")
+            with patch.object(storage, "append", fail_call), patch.object(
                     tools, "run_get_current_time", lambda: executed.append(True)):
                 events = await self.exchange(socket, "时间", attached[-1]["session_id"])
         self.assertFalse(executed)
         self.assertTrue(any(e["type"] == "error" and "磁盘" in e["text"] for e in events))
-        self.assertTrue(all(not state.lock.locked() for state in self.runtime.sessions.values()))
+        self.assertTrue(all(not state.lock.locked() for state in self.runtime.session_manager.sessions.values()))
 
     async def test_disconnect_keeps_accepted_request_running(self) -> None:
         """客户端退出不取消已接受请求，完成后其他连接能读取结果。"""
@@ -236,9 +241,9 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(self.client.responses, "create", side_effect=delayed_response):
             async with connect(self.url, proxy=None) as socket:
-                events = await self.exchange(socket, "/attach")
+                events = await self.exchange(socket, "/new")
                 session_id = events[-1]["session_id"]
-                await socket.send(json.dumps({"input": "断线测试", "session_id": session_id}))
+                await socket.send(json.dumps({"input": "断线测试", "session_id": session_id, "type": InboundType.CHAT}))
                 await asyncio.wait_for(started.wait(), 5)
             release.set()
             await asyncio.wait_for(asyncio.gather(*list(self.runtime.requests)), 5)
@@ -247,11 +252,11 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         snapshot = next(event for event in events if event["type"] == "session")
         self.assertIn("断线后仍保存", json.dumps(snapshot, ensure_ascii=False))
 
-    async def test_restart_restores_latest_session(self) -> None:
-        """常驻协调层重建后从 JSONL 恢复，不依赖前一次进程的内存。"""
+    async def test_restart_restores_bound_session(self) -> None:
+        """常驻协调层重建后按入口绑定恢复，不依赖前一次进程的内存。"""
         self.outputs.extend([[assistant_message("已保存历史")], [assistant_message("恢复后继续")]])
         async with connect(self.url, proxy=None) as socket:
-            events = await self.exchange(socket, "/attach")
+            events = await self.exchange(socket, "/new")
             session_id = events[-1]["session_id"]
             await self.exchange(socket, "重启前的问题", session_id)
         await self.close_service()
@@ -260,7 +265,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.start()
         self.url = self.runtime.message_dispatcher.channels["terminal_test"].uri
         async with connect(self.url, proxy=None) as socket:
-            events = await self.exchange(socket, "/attach")
+            events = await self.exchange(socket, request_type=InboundType.GET_HISTORY)
             self.assertEqual(events[-1]["session_id"], session_id)
             await self.exchange(socket, "重启后的问题", session_id)
         self.assertEqual(self.requests[-1]["input"][0]["content"], "重启前的问题")

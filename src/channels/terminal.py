@@ -6,7 +6,7 @@ from uuid import uuid4
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit
+from src.channels.base import Channel, ChannelDisconnected, InboundMessage, InboundType, Submit
 
 
 # 终端连接生命周期和协议错误的日志。
@@ -54,7 +54,8 @@ class TerminalChannel(Channel):
                     if not isinstance(text, str) or not isinstance(data.get("session_id", ""), str):
                         raise ValueError("input 和 session_id 必须为文本")
                     message = InboundMessage(str(data.get("request_id") or uuid4().hex),
-                                             self.channel_id, target, data.get("session_id", ""), text.strip())
+                                             self.channel_id, target, data.get("session_id", ""), text.strip(),
+                                             InboundType(data["type"]))
                     self.submit(message)
                 except (ValueError, KeyError, TypeError) as error:
                     logger.warning("终端输入无效：%s", error)

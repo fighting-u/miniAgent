@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.config import Config
 from src.channels.base import ChannelDisconnected, InboundMessage, MessageDispatcher
 from src.channels.manager import ChannelManager
+from src.session.session_manager import SessionManager
 from tests.temp_workspace import temporary_workspace
 
 
@@ -30,8 +31,8 @@ async def check_connection() -> None:
     def submit(event: InboundMessage | ChannelDisconnected) -> None:
         """仅验证连接，忽略输入及断线通知，不启动 Agent 请求。"""
 
-    manager = ChannelManager(config, message_dispatcher, submit)
     with temporary_workspace("miniagent-qq-") as root:
+        manager = ChannelManager(config, message_dispatcher, submit, SessionManager(root / "sessions"))
         # 日志只保存在本次临时目录，不输出请求头或原始平台响应。
         handler = logging.FileHandler(root / "connection.log", encoding="utf-8")
         progress = logging.StreamHandler(sys.stdout)

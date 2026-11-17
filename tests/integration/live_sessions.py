@@ -21,7 +21,7 @@ from src.config import Config
 from src.agent import core
 from src.context.context_compactor import ContextCompactor
 from src.memory.memory import message_text
-from src.session.session_store import SessionStore
+from src.session import storage
 
 
 def read_records(path: Path) -> list[dict]:
@@ -40,7 +40,7 @@ async def worker(phase: str, state_path: Path) -> None:
         raise RuntimeError("真实测试需要配置 model 和模型密钥环境变量。")
     if phase == "first":
         # 会话和工具读取的文件均位于父进程管理的临时目录，不写入正式 sessions。
-        session = SessionStore.create(state_path.parent / "sessions")
+        session = storage.create(state_path.parent / "sessions")
         history = []
         token = f"青松-{session.path.stem[-8:]}"
         fixture = session.path.with_suffix(".fixture.txt")
@@ -50,12 +50,13 @@ async def worker(phase: str, state_path: Path) -> None:
         question = f"请调用 read_file 读取 {fixture.as_posix()}，记住里面的验证口令，只回复该口令。"
     else:
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        session, history = SessionStore.load(state["path"])
+        session = storage.load(state["path"])
+        history = session.messages
         token = state["token"]
         if session.pending_calls:
             raise AssertionError("第一进程应已完成工具调用")
         question = "上次读取文件中的验证口令是什么？只回复该口令，无需再次读取。"
-    history.append(session.start_turn(question))
+    history.append(storage.start_turn(session, question))
     async with AsyncExitStack() as stack:
         # 仅保留简短会话和只读文件工具，避免无关记忆写入或压缩增加测试复杂度。
         stack.enter_context(patch.object(core, "load_memories", return_value=""))
@@ -88,7 +89,7 @@ async def worker(phase: str, state_path: Path) -> None:
             async for event in events:
                 if event["type"] == "items":
                     for item in event["items"]:
-                        session.append(item, model_name=event.get("model_name"))
+                        storage.append(session, item, model_name=event.get("model_name"))
     answer = message_text(history[-1])
     if token not in answer:
         raise AssertionError(f"{phase} 阶段未正确回答已读取的口令")
@@ -136,7 +137,7 @@ def main() -> None:
             raise AssertionError("ordinal 不连续")
         if set(row["turn_id"] for row in rows) != {0, 1}:
             raise AssertionError("turn_id 未在恢复后递增")
-        restored, _ = SessionStore.load(session_path)
+        restored = storage.load(session_path)
         if restored.pending_calls:
             raise AssertionError("仍有未配对工具调用")
     print("真实跨进程续聊测试通过；本次临时会话、工具读取文件和状态文件已自动清理。")
