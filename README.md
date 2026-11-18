@@ -1,7 +1,7 @@
 # MiniAgent
 这是一个学习项目，从零搭建1个agent。模仿codex，claude code，openclaw为主，主要学的是思想，harness工程。
 
-核心代码在`src\agent\core.py`内。
+核心代码在`src\message_process\turn_runner.py`内。
 
 ## 项目结构
 
@@ -10,32 +10,33 @@ miniAgent/
 ├── src/                        # Python 源码包，各子目录通过 __init__.py 标记为包
 │   ├── __main__.py             # python -m src 入口、运行时与通道组装及收尾
 │   ├── config.py               # Config 类、项目根目录和唯一 YAML 配置读取
-│   ├── terminal.py             # python -m src.terminal 独立终端客户端
+│   ├── runtime.py              # AgentRuntime 负责资源生命周期、依赖组装和任务调度
+│   ├── system_prompt.py        # 构建模型系统提示词
+│   ├── hook/                   # Hook 与权限审批
+│   │   ├── hook.py             # Hook 注册、权限检查和运行日志扩展
+│   │   └── permissions.py      # 审批等待和控制消息回传
 │   ├── channels/               # 通道协议适配
 │   │   ├── base.py             # 输入类型枚举、统一输入、通道基类和 MessageDispatcher
 │   │   ├── manager.py          # 类型注册、实例生命周期与提交回调传递
 │   │   ├── terminal.py         # 常驻端 WebSocket 监听与回复发送
 │   │   └── qq.py               # QQ 官方鉴权、网关心跳与好友私聊收发
-│   ├── runtime/                # 常驻运行协调
-│   │   ├── runtime.py          # AgentRuntime：模型/MCP 生命周期、请求分发、并发控制和 Agent 事件协调
-│   │   └── permissions.py      # 审批等待和控制消息回传
-│   ├── agent/                  # Agent 主流程
-│   │   ├── core.py             # 对话循环、模型请求和工具调度
-│   │   ├── hook.py             # Hook 注册、权限检查和运行日志扩展
-│   │   └── system_prompt.py    # 构建模型系统提示词
+│   ├── message_process/        # 入口消息处理与 Agent 轮次执行
+│   │   ├── message_processor.py # 消息分发、会话命令和占用判断
+│   │   └── turn_runner.py      # 对话循环、模型请求、工具调度和事件处理
 │   ├── tools/                  # 工具与扩展接入
 │   │   ├── tools.py            # 工具初始化、处理函数和任务计划管理
 │   │   ├── mcp_manager.py      # MCP 生命周期、工具发现、注册和调用
 │   │   └── skill.py            # 本地技能发现与按需加载
 │   ├── memory/                 # 长期记忆
 │   │   └── memory.py           # 长期记忆提取、存储和召回
-│   ├── context/                # 对话上下文压缩
+│   ├── context_compact/        # 对话上下文压缩
 │   │   └── context_compactor.py # 工具结果落盘、历史裁剪和摘要
 │   ├── session/
 │   │   ├── session.py          # Session：历史、存储进度、会话锁和计划
 │   │   ├── session_manager.py  # SessionManager：会话缓存、历史快照和入口绑定
 │   │   └── storage.py          # 会话 JSONL 存储与恢复函数，显式操作 Session
 │   ├── ui/
+│   │   ├── terminal.py         # python -m src.ui.terminal 独立终端客户端
 │   │   └── terminal_ui.py      # 终端输入、菜单和历史展示
 │   └── common/
 │       └── logging_config.py   # 文件诊断日志配置
@@ -79,7 +80,7 @@ miniAgent/
 python -m src
 
 # 第二个终端：连接常驻程序并聊天。
-python -m src.terminal
+python -m src.ui.terminal
 ```
 
 统一配置通过 `Config.load()` 从根目录 `config.yaml` 读取。模型名称和 `base_url` 配置在 YAML；模型密钥及 QQ 凭据保留在本地 `.env`，由配置层统一解析。工作区和额外允许目录的相对路径以所选 YAML 所在目录为基准，工作区默认是项目根目录；会话、技能、记忆、日志、归档和工具结果的目录名常量分别定义在负责模块中，使用时与 `PROJECT_ROOT` 拼接，不从 YAML 读取；不再由工具模块各自读取启动目录或环境变量。旧的 `.mcp.json`、`.channels.yaml` 已合并并移除。

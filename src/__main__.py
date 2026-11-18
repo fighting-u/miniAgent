@@ -1,11 +1,11 @@
-"""常驻程序入口：终端客户端通过 python -m src.terminal 单独启动。"""
+"""常驻程序入口：终端客户端通过 python -m src.ui.terminal 单独启动。"""
 
 import asyncio
 import logging
 
 from src.common.logging_config import setup_logging
 from src.config import Config
-from src.runtime.runtime import AgentRuntime
+from src.runtime import AgentRuntime
 
 
 # 常驻程序的启动与资源回收日志。
@@ -19,7 +19,7 @@ async def serve(config: Config) -> None:
     runtime = AgentRuntime(config)
     try:
         await runtime.start()
-        print("常驻程序运行中，另开终端执行 python -m src.terminal；Ctrl+C 停止。", flush=True)
+        print("常驻程序运行中，另开终端执行 python -m src.ui.terminal；Ctrl+C 停止。", flush=True)
         await asyncio.Future()
     finally:
         await runtime.stop()
