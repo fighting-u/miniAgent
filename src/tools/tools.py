@@ -251,7 +251,7 @@ def run_glob(pattern: str, *, config: Config) -> str:
 
 
 class PlanManager:
-    """保存、校验并展示当前任务计划。"""
+    """保存、校验并展示当前 turn 的任务计划。"""
 
     def __init__(self) -> None:
         """初始化空的计划清单。"""
@@ -310,19 +310,19 @@ class PlanManager:
         return "\n".join(lines)
 
 
-# 当前 Agent 任务的计划管理器由会话持有，并在工具调用时显式传入。
+# 当前 turn 的计划管理器绑定在工具处理器中，供本轮工具调用使用。
 def run_update_plan(plan: list[Any] | str, *, manager: PlanManager) -> str:
-    """更新当前会话计划，展示由工具结果事件交给通道完成。"""
+    """更新当前 turn 的计划，展示由工具结果事件交给通道完成。"""
     try:
         output = manager.update(plan)
     except ValueError as error:
         return f"错误：{error}"
-    logger.info("当前会话计划已更新")
+    logger.info("当前 turn 计划已更新")
     return output
 
 # todo:?
 def build_tool_handlers(config: Config, plan: PlanManager) -> dict[str, Any]:
-    """把当前配置和会话计划绑定到工具分发表，不再依赖全局工作区或技能实例。"""
+    """把当前配置和本 turn 的计划绑定到工具分发表，不再依赖全局工作区或技能实例。"""
     return {
         "get_model_name": partial(run_get_model_name, config=config),
         "get_current_time": run_get_current_time,

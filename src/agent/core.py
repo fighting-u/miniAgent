@@ -29,11 +29,10 @@ async def agent_loop(
     client: AsyncOpenAI, messages: list[Any], active_request: str,
     config: Config,
     mcp: MCPManager | None = None,
-    plan: PlanManager | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """持续请求模型和执行工具，通过事件生成器交给外层持久化与分发。"""
-    # 当前会话独立持有计划，避免不同入口切换会话时共用可变状态。
-    plan = plan if plan is not None else PlanManager()
+    # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
+    plan = PlanManager()
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
     relevant_memories = await load_memories(client, messages, config)
     instructions = build_system_prompt(config, relevant_memories)
@@ -80,8 +79,6 @@ async def agent_loop(
                 yield {"type": "items", "items": [forced_message]}
                 messages.append(forced_message)
                 continue
-            # todo: 我都return了，直接return的外层调用或许更好吧？少传1个参数
-            # 已移至外层：确定本轮正常结束后，提取 messages 快照并安排后台记忆任务。
             return
 
         # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。

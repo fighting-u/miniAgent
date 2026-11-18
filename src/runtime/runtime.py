@@ -33,10 +33,8 @@ class AgentRuntime:
             raise ValueError(f"请在 config.yaml 配置 model，并设置 {config.api_key_env} 环境变量")
         self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)  # 构造客户端，stop 时关闭。
         self.mcp = MCPManager(config)  # 构造管理器，start 时建立连接。
-        # todo:
-        self.limit = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
+        self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests: dict[asyncio.Task, InboundMessage | ChannelDisconnected] = {}  # 跟踪已接受的输入任务，退出时等待完成。
-        # todo:具体命名消息分发器
         self.message_dispatcher = MessageDispatcher()
         # todo: ?
         self.approvals = ApprovalBroker(self.message_dispatcher)
@@ -127,7 +125,7 @@ class AgentRuntime:
         # todo：传那么多参数，是否会太乱以及不易维护？配置集中传入，资源由本运行时管理。
         try:
             async with aclosing(agent_loop(self.client, session.messages, message.input,
-                                          self.config, self.mcp, session.plan)) as events:
+                                          self.config, self.mcp)) as events:
                 async for event in events:
                     await self.process_event(message, session, event)
         except BaseException:
@@ -159,7 +157,7 @@ class AgentRuntime:
             elif message.type == InboundType.LIST_SESSIONS:
                 await self._list_sessions(message)
             elif message.type == InboundType.COMMAND:
-                async with self.limit:
+                async with self.max_concurrent_requests:
                     await self._command(message)
             elif message.input:
                 # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
@@ -177,7 +175,7 @@ class AgentRuntime:
                     message.session_id = session.id
                     # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
                     await self.message_dispatcher.send(message, {"type": "session_created"})
-                async with self.limit:
+                async with self.max_concurrent_requests:
                     trigger_hooks("PreUserPromptSubmit", self.config)
                     self.session_manager.start_turn(session, message.input)
                     self.session_manager.bind(message.channel_id, session.id)
