@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator
@@ -10,9 +9,10 @@ from src.config import Config
 from src.context.context_compactor import ContextCompactor, is_context_length_error
 from src.agent.hook import check_deny_list, check_rules, trigger_hooks
 from src.memory.memory import load_memories
-from src.tools.mcp_manager import MCPManager
 from src.agent.system_prompt import build_system_prompt
-from src.tools.tools import PlanManager, build_tool_handlers, TOOLS
+from src.tools.local_tools import PlanManager
+from src.tools.tool import ToolContext
+from src.tools.tool_manager import ToolManager
 
 
 # 当前模块使用的日志记录器。
@@ -28,17 +28,17 @@ MAX_REACTIVE_COMPACT_RETRIES = 1
 async def agent_loop(
     client: AsyncOpenAI, messages: list[Any], active_request: str,
     config: Config,
-    mcp: MCPManager | None = None,
+    tool_manager: ToolManager,
 ) -> AsyncIterator[dict[str, Any]]:
     """持续请求模型和执行工具，通过事件生成器交给外层持久化与分发。"""
     # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
-    plan = PlanManager()
+    tool_context = ToolContext(plan=PlanManager())
+    # todo:感觉这个应该放别的地方，hook或者外层
     # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
     relevant_memories = await load_memories(client, messages, config)
     instructions = build_system_prompt(config, relevant_memories)
-    handlers = build_tool_handlers(config, plan)
-    # MCPManager 已在启动阶段组装完整工具列表，核心循环不处理初始化任务。
-    available_tools = mcp.available_tools if mcp is not None else TOOLS
+    # ToolManager 已在启动阶段注册工具，核心循环不处理初始化任务。
+    available_tools = tool_manager.get_schemas()
     # 记录连续多少轮工具调用没有使用计划工具。
     rounds_since_plan = 0
     # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
@@ -84,11 +84,12 @@ async def agent_loop(
         # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
         results = []
         used_plan = False
-        compact_requested = False
         for tool_call in tool_calls:
             try:
                 # 这里是因为claude返回就是python字典，而openAI是json，要转换下
                 arguments = json.loads(tool_call.arguments)
+                if not isinstance(arguments, dict):
+                    raise TypeError("工具参数必须是 JSON 对象")
 
                 # 工具执行前触发 Hook，返回非 None 值时跳过本次工具调用。
                 blocked = trigger_hooks("PreToolUse", tool_call, arguments)
@@ -116,25 +117,14 @@ async def agent_loop(
                     results.append(result)
                     continue
 
-                if tool_call.name == "compact":
-                    output = "已收到主动压缩请求，将在本轮工具调用全部结束后压缩上下文。"
-                    compact_requested = True
-                    logger.info("模型主动请求压缩上下文")
-                # todo: 是否能统一调用呢？就算不能统一调用，这部分确实也该写成个统一的execute_tool()，不该加重主函数
-                elif mcp is not None and tool_call.name in mcp.routes:
-                    output = await mcp.call_tool(tool_call.name, arguments)
-                else:
-                    handler = handlers.get(tool_call.name)
-                    if tool_call.name == "update_plan":
-                        output = str(handler(**arguments))
-                    else:
-                        # 同步工具移到工作线程，保持常驻端监听和审批收发可响应。
-                        output = str(await asyncio.to_thread(handler, **arguments)) if handler else f"未知工具: {tool_call.name}"
+                # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
+                output = str(await tool_manager.call(tool_call.name, arguments, tool_context))
                 trigger_hooks("PostToolUse", tool_call, output)
 
                 if tool_call.name == "update_plan":
                     used_plan = True
             except (json.JSONDecodeError, TypeError) as error:
+                logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
                 output = f"工具参数无效：{error}"
 
             result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
@@ -146,13 +136,10 @@ async def agent_loop(
         if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
             reminder = {
                 "role": "system",
-                "content": f"系统提醒：当前已连续{PLAN_REMINDER_INTERVAL}轮没使用或更新任务计划，如果任务复杂或步骤多请使用 update_plan 更新任务计划。\n当前计划：\n{plan.render()}",
+                "content": f"系统提醒：当前已连续{PLAN_REMINDER_INTERVAL}轮没使用或更新任务计划，如果任务复杂或步骤多请使用 update_plan 更新任务计划。\n当前计划：\n{tool_context.plan.render()}",
             }
             yield {"type": "items", "items": [reminder]}
             results.append(reminder)
             rounds_since_plan = 0
         messages.extend(results)
-        # 等同普通工具一样先保留调用和结果配对，再整体归档并生成摘要。
-        if compact_requested:
-            messages[:] = await compactor.compact_history(messages, active_request)
 

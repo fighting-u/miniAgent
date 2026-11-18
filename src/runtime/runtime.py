@@ -16,7 +16,7 @@ from src.runtime.permissions import ApprovalBroker
 from src.session.session import Session, get_owner_id
 from src.session.session_manager import SessionManager, serializable
 from src.session.storage import SESSION_DIR_NAME
-from src.tools.mcp_manager import MCPManager
+from src.tools.tool_manager import ToolManager
 
 
 # 会话协调、请求执行和持久化的日志。
@@ -32,7 +32,7 @@ class AgentRuntime:
         if not config.api_key or not config.model.strip():
             raise ValueError(f"请在 config.yaml 配置 model，并设置 {config.api_key_env} 环境变量")
         self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)  # 构造客户端，stop 时关闭。
-        self.mcp = MCPManager(config)  # 构造管理器，start 时建立连接。
+        self.tool_manager = ToolManager(config)  # 共享工具管理器，start 时注册工具并建立 MCP 连接。
         self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests: dict[asyncio.Task, InboundMessage | ChannelDisconnected] = {}  # 跟踪已接受的输入任务，退出时等待完成。
         self.message_dispatcher = MessageDispatcher()
@@ -44,9 +44,9 @@ class AgentRuntime:
         self.background_tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
-        """会话按入口选择懒加载；先启动 MCP 再启动通道。"""
-        # 通道收到输入后立即提交，先准备 MCP，保证请求执行时工具已就绪。
-        await self.mcp.start()
+        """会话按入口选择懒加载，先准备工具再启动通道。"""
+        # 通道收到输入后立即提交，先准备工具，保证请求执行时工具已就绪。
+        await self.tool_manager.start()
         await self.channels.start()
         logger.info("AgentRuntime 已启动：model=%s workdir=%s", self.config.model, self.config.workdir)
 
@@ -125,7 +125,7 @@ class AgentRuntime:
         # todo：传那么多参数，是否会太乱以及不易维护？配置集中传入，资源由本运行时管理。
         try:
             async with aclosing(agent_loop(self.client, session.messages, message.input,
-                                          self.config, self.mcp)) as events:
+                                          self.config, self.tool_manager)) as events:
                 async for event in events:
                     await self.process_event(message, session, event)
         except BaseException:
@@ -188,7 +188,7 @@ class AgentRuntime:
             await self.message_dispatcher.send(message, {"type": "done"})
 
     async def stop(self) -> None:
-        """停止通道、完成请求和后台任务后关闭 MCP 和模型客户端，允许启动失败后调用。"""
+        """停止通道、完成请求和后台任务后关闭工具和模型客户端，允许启动失败后调用。"""
         try:
             try:
                 await self.channels.stop()
@@ -196,7 +196,7 @@ class AgentRuntime:
                 await self._drain()
         finally:
             try:
-                await self.mcp.stop()
+                await self.tool_manager.stop()
             finally:
                 await self.client.close()
         logger.info("AgentRuntime 已停止，共享模型与 MCP 资源已关闭")

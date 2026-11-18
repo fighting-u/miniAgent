@@ -3,7 +3,7 @@ import re
 from typing import Any, Callable
 
 from src.config import Config
-from src.tools.tools import is_allowed_path
+from src.tools.local_tools import is_allowed_path
 
 
 # 当前模块使用的日志记录器。
@@ -68,7 +68,9 @@ def contains_destructive_command(command: str) -> bool:
 PERMISSION_RULES = [
     {
         "tools": ["read_file", "write_file", "edit_file"],
-        "check": lambda args, config: not is_allowed_path((config.workdir / str(args.get("path", ""))).resolve(), config),
+        "check": lambda args, config: not is_allowed_path(
+            (config.workdir / str(args.get("path", ""))).resolve(), config.workdir, config.extra_allowed_dirs,
+        ),
         "message": "访问允许的目录之外的文件",
     },
     {

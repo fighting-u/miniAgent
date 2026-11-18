@@ -2,8 +2,9 @@ import asyncio
 import json
 import logging
 import re
-from datetime import timedelta
 from contextlib import asynccontextmanager
+from datetime import timedelta
+from functools import partial
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -14,7 +15,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from src.config import Config
-from src.tools.tools import assemble_tools
+from src.tools.tool import Tool, ToolContext
 
 
 # MCP 连接与工具发现的总等待时间，以及单次工具调用的等待时间。
@@ -32,55 +33,54 @@ def normalize_mcp_name(name: str) -> str:
 
 
 class MCPManager:
-    """维护 stdio 或 Streamable HTTP 连接、静态工具定义及调用路由。"""
+    """维护 stdio 或 Streamable HTTP 连接，发现并适配 MCP 工具。"""
 
     def __init__(self, config: Config) -> None:
         """保存统一配置和连接任务，不再自行读取另一个配置文件。"""
-        self.config = config
-        self.tools: list[dict[str, Any]] = []
-        self.available_tools: list[dict[str, Any]] = []  # 启动完成后发布给 Agent 的完整工具定义。
-        self.routes: dict[str, tuple[ClientSession, str]] = {}
-        self.tasks: list[asyncio.Task[None]] = []
+        self._servers = config.mcp_servers
+        self._tasks: list[asyncio.Task[None]] = []  # 每个任务持有一个服务器的连接。
 
-    async def start(self) -> None:
-        """并行连接服务器，完成工具发现、路由注册和完整工具列表组装。"""
-        servers = self.config.mcp_servers
+    async def start(self) -> list[Tool]:
+        """并行连接服务器，返回已绑定连接的工具供 ToolManager 注册。"""
         # 每个连接任务自行进入和退出 SDK 上下文，避免跨任务关闭 AnyIO 取消作用域。
-        pending = []
+        pending: list[asyncio.Future[list[Tool]]] = []
+        loop = asyncio.get_running_loop()
         seen_names = set()
-        for original_name, settings in servers.items():
+        for original_name, settings in self._servers.items():
             name = normalize_mcp_name(original_name)
             if name in seen_names:
                 logger.warning("MCP 服务器 %s 修正后名称 %s 重复，保留第一项", original_name, name)
                 continue
             seen_names.add(name)
-            ready = asyncio.get_running_loop().create_future()
-            self.tasks.append(asyncio.create_task(self._serve(name, settings, ready)))
+            ready: asyncio.Future[list[Tool]] = loop.create_future()
+            self._tasks.append(asyncio.create_task(self._serve(name, settings, ready)))
             pending.append(ready)
-        discovered = await asyncio.gather(*pending)
-        for definitions, routes in discovered:
-            if self.routes.keys() & routes.keys():
+
+        tools = []
+        seen_tools = set()
+        for definitions in await asyncio.gather(*pending):
+            names = {tool.name for tool in definitions}
+            if conflicts := seen_tools & names:
                 # 服务器 a__b 的工具 c，与服务器 a 的工具 b__c，都会得到 mcp__a__b__c；太奇葩了，应该很少出现
                 print("MCP 工具名称与其他服务器冲突，跳过该服务器的工具。")
-                logger.warning("跳过 MCP 重名工具：%s", self.routes.keys() & routes.keys())
+                logger.warning("跳过 MCP 重名工具：%s", conflicts)
                 continue
-            self.tools.extend(definitions)
-            self.routes.update(routes)
-        self.available_tools = assemble_tools(self.tools)
+            tools.extend(definitions)
+            seen_tools.update(names)
+        return tools
 
     @asynccontextmanager
-    async def _transport(self, settings: dict[str, Any]):
+    async def _transport(self, transport: str, settings: dict[str, Any]):
         """按配置选择传输，在连接所属任务内统一管理传输和 HTTP 客户端。"""
-        transport = settings.get("type", "http" if "url" in settings else "stdio")
-        logger.info("MCP 开始连接，传输类型：%s", transport)
         if transport == "stdio":
             if "url" in settings:
                 raise ValueError("stdio 配置不能包含 url")
             async with stdio_client(StdioServerParameters(**settings)) as streams:
                 yield streams
-        elif transport in {"http", "streamable-http"}:
+        elif transport in ("http", "streamable-http"):
             url = settings.get("url", "")
-            if not isinstance(url, str) or urlsplit(url).scheme not in {"http", "https"} or not urlsplit(url).netloc:
+            address = urlsplit(url) if isinstance(url, str) else None
+            if address is None or address.scheme not in {"http", "https"} or not address.netloc:
                 raise ValueError("HTTP MCP 必须配置有效的 http/https url")
             if "command" in settings:
                 raise ValueError("HTTP 配置不能包含 command")
@@ -93,19 +93,20 @@ class MCPManager:
         else:
             raise ValueError(f"不支持的 MCP 传输类型：{transport}")
 
-    async def _serve(self, name: str, settings: Any, ready: asyncio.Future) -> None:
-        """建立单个连接、发现全部工具，并保持上下文直到收到退出信号。"""
+    async def _serve(self, name: str, settings: Any, ready: asyncio.Future[list[Tool]]) -> None:
+        """管理单个服务器的连接尝试和故障日志。"""
         try:
             if not isinstance(settings, dict):
                 raise ValueError("服务器配置必须是对象")
             transport = settings.get("type", "http" if "url" in settings else "stdio")
-            attempts = MCP_HTTP_CONNECT_ATTEMPTS if transport in {"http", "streamable-http"} else 1
+            attempts = MCP_HTTP_CONNECT_ATTEMPTS if transport in ("http", "streamable-http") else 1
             for attempt in range(1, attempts + 1):
                 try:
-                    await self._connect(name, settings, ready)
+                    logger.info("MCP 服务器 %s 开始连接，传输类型：%s", name, transport)
+                    await self._connect(name, transport, settings, ready)
                     return
                 except Exception as error:
-                    # 工具发布后不再重连，避免重新绑定已交付给 Agent 的路由。
+                    # 工具发布后不再重连，避免重新绑定已交付给 Agent 的执行入口。
                     if ready.done() or attempt == attempts:
                         raise
                     logger.warning("MCP HTTP 服务器 %s 首次连接失败（%d/%d），准备重试：%s",
@@ -116,48 +117,57 @@ class MCPManager:
             print(f"MCP 服务器 {name} 不可用：{error}")
         finally:
             if not ready.done():
-                ready.set_result(([], {}))
+                ready.set_result([])
 
-    async def _connect(self, name: str, settings: dict[str, Any], ready: asyncio.Future) -> None:
+    async def _connect(
+        self, name: str, transport: str, settings: dict[str, Any], ready: asyncio.Future[list[Tool]],
+    ) -> None:
         """执行一次连接及工具发现，发布成功后保持连接直到退出。"""
-        async with self._transport(settings) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_CALL_TIMEOUT)) as session:
-                definitions = []
-                routes = {}
-                with anyio.fail_after(MCP_CONNECT_TIMEOUT):
-                    await session.initialize()
-                    cursor = None
-                    seen_cursors = set()
-                    while True:
-                        page = await session.list_tools(cursor=cursor)
-                        for tool in page.tools:
-                            # 完整名称最多 64 字符；修正或截断造成的重名沿用原冲突处理。
-                            exposed = f"mcp__{name}__{normalize_mcp_name(tool.name)}"[:64]
-                            if exposed in routes:
-                                raise ValueError(f"工具名称重复：{exposed}")
-                            definitions.append({
-                                "type": "function", "name": exposed,
-                                "description": tool.description or f"调用 {name} 的 {tool.name} 工具",
-                                "parameters": tool.inputSchema, "strict": False,
-                            })
-                            routes[exposed] = (session, tool.name)
-                        cursor = page.nextCursor
-                        if cursor is None:
-                            break
-                        if cursor in seen_cursors:
-                            raise ValueError("工具列表分页游标重复")
-                        seen_cursors.add(cursor)
-                if not ready.done():
-                    ready.set_result((definitions, routes))
-                logger.info("MCP 服务器 %s 工具发现完成，共 %d 个工具", name, len(definitions))
-                # 保持连接，直到 stop 取消当前任务并触发上下文退出。
-                await asyncio.Future()
+        async with (
+            self._transport(transport, settings) as (read, write),
+            ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_CALL_TIMEOUT)) as session,
+        ):
+            with anyio.fail_after(MCP_CONNECT_TIMEOUT):
+                await session.initialize()
+                tools = await self._discover_tools(name, session)
+            if not ready.done():
+                ready.set_result(tools)
+            logger.info("MCP 服务器 %s 工具发现完成，共 %d 个工具", name, len(tools))
+            # 保持连接，直到 stop 取消当前任务并触发上下文退出。
+            await asyncio.Future()
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """调用已注册工具，将文本、结构化结果和错误标志转换为字符串。"""
+    async def _discover_tools(self, name: str, session: ClientSession) -> list[Tool]:
+        """分页读取服务器工具，并绑定当前连接和工具原名。"""
+        tools: dict[str, Tool] = {}
+        cursor = None
+        seen_cursors = set()
+        while True:
+            page = await session.list_tools(cursor=cursor)
+            for tool in page.tools:
+                # 完整名称最多 64 字符；修正或截断造成的重名沿用原冲突处理。
+                exposed = f"mcp__{name}__{normalize_mcp_name(tool.name)}"[:64]
+                if exposed in tools:
+                    raise ValueError(f"工具名称重复：{exposed}")
+                tools[exposed] = Tool(
+                    name=exposed,
+                    description=tool.description or f"调用 {name} 的 {tool.name} 工具",
+                    parameters=tool.inputSchema,
+                    execute=partial(self._call_tool, session, tool.name),
+                    strict=False,
+                )
+            cursor = page.nextCursor
+            if cursor is None:
+                return list(tools.values())
+            if cursor in seen_cursors:
+                raise ValueError("工具列表分页游标重复")
+            seen_cursors.add(cursor)
+
+    async def _call_tool(
+        self, session: ClientSession, name: str, arguments: dict[str, Any], _context: ToolContext,
+    ) -> str:
+        """通过绑定的连接和原始名称调用工具，沿用现有 MCP 结果格式。"""
         try:
-            session, original = self.routes[name]
-            result = await session.call_tool(original, arguments)
+            result = await session.call_tool(name, arguments)
             content = [
                 block.model_dump(mode="json", by_alias=True, exclude_none=True)
                 if block.type == "text" else {"type": block.type, "text": "暂不支持此类型的 MCP 内容"}
@@ -173,9 +183,8 @@ class MCPManager:
         """统一取消任务，等待 SDK 关闭 stdio 子进程或 HTTP 会话及客户端。"""
         # todo:这里有必要等待吗，直接关了也行？
         # cancel 仅请求停止；仍需 gather 等待上下文清理实际完成。
-        tasks = [*self.tasks]
         # 同时终止仍在握手或发现工具的任务，取消后由各任务自己的上下文负责关闭。
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
