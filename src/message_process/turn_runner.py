@@ -10,9 +10,9 @@ from openai import AsyncOpenAI
 from src.channels.base import InboundMessage, MessageDispatcher
 from src.config import Config
 from src.context_compact.context_compactor import ContextCompactor, is_context_length_error
-from src.hook.hook import check_approval_required, check_powershell_deny_command, trigger_hooks
-from src.hook.permissions import ApprovalBroker
+from src.hook.hook import trigger_hooks
 from src.memory.memory import extract_memories, load_memories
+from src.security.tool_guard import ToolDecision, audit_tool_request
 from src.session.session import Session
 from src.session.session_manager import SessionManager, serializable
 from src.system_prompt import build_system_prompt
@@ -37,26 +37,25 @@ class TurnRunner:
         tool_manager: ToolManager,
         session_manager: SessionManager,
         message_dispatcher: MessageDispatcher,
-        approvals: ApprovalBroker,
         background_tasks: list[asyncio.Task],
     ) -> None:
-        """使用共享的模型、工具、会话和后台任务列表，以及消息处理器的审批对象。"""
+        """使用共享的模型、工具、会话、消息分发器和后台任务列表。"""
         self.client = client
         self.config = config
         self.tool_manager = tool_manager
         self.session_manager = session_manager
         self.message_dispatcher = message_dispatcher
-        self.approvals = approvals
         self.background_tasks = background_tasks
 
     async def process_event(self, inbound_message: InboundMessage, session: Session, event: dict[str, Any]) -> None:
-        """原始事件先落盘再分发，审批事件在原对象中填写决定。"""
+        """原始消息条目先落盘再分发，并为需要审批的事件保留处理入口。"""
         if event["type"] == "items":
             for item in event["items"]:
                 self.session_manager.append(session, item, model_name=event.get("model_name"))
             await self.message_dispatcher.send(inbound_message, {"type": "items", "items": [serializable(item) for item in event["items"]]})
-        elif event["type"] == "permission":
-            event["allowed"] = await self.approvals.request(inbound_message, event)
+        elif event["type"] == ToolDecision.REQUIRE_APPROVAL:
+            # TODO：实现需要用户审批的事件处理。
+            pass
         else:
             await self.message_dispatcher.send(inbound_message, event)
 
@@ -123,37 +122,34 @@ class TurnRunner:
                         arguments = json.loads(tool_call.arguments)
                         if not isinstance(arguments, dict):
                             raise TypeError("工具参数必须是 JSON 对象")
-
-                        # 工具执行前触发 Hook，返回非 None 值时跳过本次工具调用。
-                        blocked = trigger_hooks("PreToolUse", tool_call, arguments)
-                        # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
-                        denied = check_powershell_deny_command(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
-                        reason = check_approval_required(tool_call.name, arguments, self.config, tool_context) if denied is None else None
-                        if blocked is None:
-                            if reason:
-                                permission = {
-                                    "type": "permission",
-                                    "name": tool_call.name,
-                                    "arguments": arguments,
-                                    "reason": reason,
-                                    "allowed": False,
-                                }
-                                # 处理事件时填写审批结果，再决定是否执行；审批异常由轮次恢复处理。
-                                await self.process_event(inbound_message, session, permission)
-                                if not permission["allowed"]:
-                                    denied = "权限被拒绝。"
-                            if denied:
-                                logger.warning("工具 %s 被权限策略拒绝：%s", tool_call.name, denied)
-                                output = denied
-                            else:
-                                # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
-                                output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
-                                trigger_hooks("PostToolUse", tool_call, output)
                     except (json.JSONDecodeError, TypeError) as error:
                         logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
-                        output = f"工具参数无效：{error}"
+                        tool_output = f"工具参数无效：{error}, 请检查工具调用格式"
 
-                    result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
+                    # 工具执行前触发 Hook
+                    trigger_hooks("PreToolUse", tool_call, arguments)
+                    # 统一审计工具请求，先检查高危规则，再检查是否需要审批。
+                    audit_result = audit_tool_request(tool_call.name, arguments, self.config, tool_context)
+                    if audit_result.decision == ToolDecision.ALLOW:
+                        # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
+                        tool_output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
+                        trigger_hooks("PostToolUse", tool_call, tool_output)
+                    elif audit_result.decision == ToolDecision.DENY:
+                        tool_output = audit_result.feedback
+                        logger.warning("工具 %s 被安全检查拒绝：%s", tool_call.name, tool_output)
+                    else:
+                        logger.warning("工具 %s 需要用户审批：%s", tool_call.name, audit_result.feedback)
+                        await self.process_event(inbound_message, session, {
+                            "type": ToolDecision.REQUIRE_APPROVAL,
+                            "name": tool_call.name,
+                            "arguments": arguments,
+                            "reason": audit_result.feedback,
+                        })
+                        # 审批处理接入前跳过工具执行，并为本次调用回填结果。
+                        tool_output = f"工具需要用户审批，未执行：{audit_result.feedback}"
+                    
+
+                    result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": tool_output}
                     await self.process_event(inbound_message, session, {"type": "items", "items": [result]})
                     results.append(result)
 

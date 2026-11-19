@@ -6,7 +6,7 @@ from uuid import uuid4
 from websockets.asyncio.server import Server, ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage, InboundType, Submit
+from src.channels.base import Channel, InboundMessage, InboundType, Submit
 
 
 # 终端连接生命周期和协议错误的日志。
@@ -65,7 +65,6 @@ class TerminalChannel(Channel):
             logger.info("终端连接已断开：%s/%s", self.channel_id, target)
         finally:
             self.connections.pop(target, None)
-            self.submit(ChannelDisconnected(self.channel_id, target))
 
     async def send(self, reply_target: str, event: dict[str, Any]) -> None:
         """将输出事件编码后发送给对应终端连接。"""

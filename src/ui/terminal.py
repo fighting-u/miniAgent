@@ -50,13 +50,6 @@ class TerminalClient:
                 self.ui.show_items(event["items"])
             elif kind in {"error", "status"}:
                 print(event["text"])
-            elif kind == "approval":
-                allowed = await self.ui.confirm_permission(event)
-                await self.connection.send(json.dumps({
-                    "type": InboundType.COMMAND,
-                    "input": f"/approve {event['approval_id']} {'allow' if allowed else 'deny'}",
-                    "session_id": self.session_id,
-                }))
             elif kind == "done":
                 return events
 

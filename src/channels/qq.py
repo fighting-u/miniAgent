@@ -7,7 +7,7 @@ from typing import Any
 
 from websockets.asyncio.client import connect
 
-from src.channels.base import Channel, ChannelDisconnected, InboundMessage, Submit, input_type
+from src.channels.base import Channel, InboundMessage, Submit, input_type
 
 
 # QQ 鉴权、网关生命周期和私聊消息转换的诊断日志；不记录凭据和请求头。
@@ -181,9 +181,6 @@ class QQChannel(Channel):
         request_id = f"{self.channel_id}:{msg_id}"
         # 当前实例携带自己的会话选择，历史和长期记忆仍可与其他入口共用。
         message = InboundMessage(request_id, self.channel_id, target, self.session_id, text, input_type(text))
-        if text.startswith("/approve "):
-            self.submit(message)
-            return
         if request_id in self.replies:
             logger.info("忽略正在处理的重复 QQ 消息：%s", request_id)
             return
@@ -206,47 +203,40 @@ class QQChannel(Channel):
         reply = self.replies[event["request_id"]]
         if reply.target != reply_target:
             raise ValueError("QQ 回复目标与原始消息不匹配")
-        kind = event["type"]
-        if kind == "session_created":
+        event_type = event["type"]
+        if event_type == "session_created":
             # 首次创建只保存 ID，不发送 QQ 提示或回显用户消息。
             self.session_id = event["session_id"]
-        elif kind == "items":
+        elif event_type == "items":
             for item in event["items"]:
                 if item.get("role") == "assistant" and item.get("type") == "message":
                     for part in item.get("content", []):
                         text = part.get("text") if part.get("type") == "output_text" else part.get("refusal")
                         if text:
                             reply.texts.append(text)
-        elif kind == "session":
+        elif event_type == "session":
             self.session_id = event["session_id"]
             await self._send_text(reply, f"{event['title']}：{event['session_id']}")
-        elif kind == "sessions":
+        elif event_type == "sessions":
             entries = event["sessions"]
             text = "\n".join(f"{entry['id']}  {entry['preview']}" for entry in entries) or "暂无历史会话。"
             await self._send_text(reply, text + "\n恢复会话：/resume <会话ID>")
-        elif kind == "approval":
-            await self._send_text(reply, f"工具 {event['name']} 需要确认：{event['reason']}\n"
-                                  f"参数：{event['arguments']}\n"
-                                  f"允许：/approve {event['approval_id']} allow\n"
-                                  f"拒绝：/approve {event['approval_id']} deny")
-        elif kind in {"status", "error"}:
+        elif event_type in {"status", "error"}:
             await self._send_text(reply, event["text"])
-        elif kind == "done":
+        elif event_type == "done":
             try:
                 await self._send_text(reply, "\n\n".join(reply.texts))
             finally:
                 self.replies.pop(event["request_id"], None)
 
     async def stop(self) -> None:
-        """取消并等待网关与心跳、提交断线通知、关闭 SDK HTTP 连接。"""
+        """取消并等待网关与心跳，关闭 SDK HTTP 连接。"""
         if self.task is not None:
             self.task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await self.task
             self.task = None
         self.connected = False
-        for target in {reply.target for reply in self.replies.values()}:
-            self.submit(ChannelDisconnected(self.channel_id, target))
         self.replies.clear()
         if self.http is not None:
             await self.http.close()

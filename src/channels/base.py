@@ -35,16 +35,8 @@ class InboundMessage:
     type: InboundType  # 请求目的；历史和列表查询不使用 input。
 
 
-@dataclass
-class ChannelDisconnected:
-    """通道连接断开通知，由 Runtime 处理该来源的待审批请求。"""
-
-    channel_id: str  # 断开连接所属的通道实例。
-    reply_target: str  # 已断开的连接或聊天目标。
-
-
-# 通道同步提交输入或断线通知；Runtime 内部调度任务，不返回任务对象。
-Submit = Callable[[InboundMessage | ChannelDisconnected], None]
+# 通道同步提交输入；Runtime 内部调度任务，不返回任务对象。
+Submit = Callable[[InboundMessage], None]
 
 
 class Channel(ABC):

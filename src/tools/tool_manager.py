@@ -59,7 +59,7 @@ class ToolManager:
                 arguments = {**arguments, "context": context}
             if is_async:
                 return await func(**arguments)
-            # 同步工具移到工作线程，保持常驻端监听和审批收发可响应。
+            # 同步工具移到工作线程，保持常驻端监听可响应。
             return await asyncio.to_thread(func, **arguments)
 
         self.register(Tool(name, description, parameters, execute, strict))

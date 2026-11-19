@@ -183,17 +183,6 @@ class TerminalUI:
         else:
             print("还没有聊天记录，输入问题开始对话。\n")
 
-    async def confirm_permission(self, event: dict[str, Any]) -> bool:
-        """在客户端确认敏感工具操作，决定通过控制消息回传。"""
-        print(f"需要权限审批：{event['reason']}\n工具：{event['name']}({event['arguments']})")
-        confirmation = PromptSession(style=UI_STYLE)
-        try:
-            with patch_stdout():
-                answer = (await confirmation.prompt_async("是否允许？[y/N] ")).strip().casefold()
-        except (EOFError, KeyboardInterrupt):
-            return False
-        return answer in {"y", "yes"}
-
     @staticmethod
     def show_items(items: list[Any]) -> None:
         """统一渲染历史和实时事件，不依赖输入框实例，细节内容提供有限预览。"""

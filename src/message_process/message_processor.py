@@ -4,10 +4,9 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from src.channels.base import ChannelDisconnected, InboundMessage, InboundType, MessageDispatcher
+from src.channels.base import InboundMessage, InboundType, MessageDispatcher
 from src.config import Config
 from src.hook.hook import trigger_hooks
-from src.hook.permissions import ApprovalBroker
 from src.message_process.turn_runner import TurnRunner
 from src.session.session import get_owner_id
 from src.session.session_manager import SessionManager
@@ -27,14 +26,12 @@ class MessageProcessor:
         tool_manager: ToolManager,
         message_dispatcher: MessageDispatcher,
         session_manager: SessionManager,
-        requests: dict[asyncio.Task, InboundMessage | ChannelDisconnected],
+        requests: dict[asyncio.Task, InboundMessage],
         background_tasks: list[asyncio.Task],
     ) -> None:
-        """保存共享依赖，并创建并发信号量、审批对象和轮次执行器。"""
+        """保存共享依赖，并创建并发信号量和轮次执行器。"""
         self.config = config
         self.message_dispatcher = message_dispatcher
-        # todo: ?
-        self.approvals = ApprovalBroker(self.message_dispatcher)
         self.session_manager = session_manager
         self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests = requests
@@ -44,7 +41,6 @@ class MessageProcessor:
             tool_manager=tool_manager,
             session_manager=session_manager,
             message_dispatcher=message_dispatcher,
-            approvals=self.approvals,
             background_tasks=background_tasks,
         )
 
@@ -99,7 +95,7 @@ class MessageProcessor:
             if confirmation != "confirm":
                 raise ValueError("删除前需要客户端二次确认。")
             if any(
-                task is not asyncio.current_task() and isinstance(request, InboundMessage) and request.session_id == session_id
+                task is not asyncio.current_task() and request.session_id == session_id
                 for task, request in self.requests.items()
             ):
                 raise ValueError("该会话仍有等待或执行中的请求，请稍后删除。")
@@ -110,14 +106,8 @@ class MessageProcessor:
         else:
             raise ValueError("未知命令，可用命令：/new、/resume、/delete、/q")
 
-    async def process_message(self, message: InboundMessage | ChannelDisconnected) -> None:
-        """按输入类型分发；断线、审批答复和会话占用判断先于并发名额等待。"""
-        if isinstance(message, ChannelDisconnected):
-            self.approvals.disconnect(message.channel_id, message.reply_target)
-            return
-        if message.type == InboundType.COMMAND and message.input.startswith("/approve "):
-            self.approvals.resolve(message)
-            return
+    async def process_message(self, message: InboundMessage) -> None:
+        """按输入类型分发，会话占用判断先于并发名额等待。"""
         try:
             # todo: 优化太多If,else
             if message.type == InboundType.GET_HISTORY:
