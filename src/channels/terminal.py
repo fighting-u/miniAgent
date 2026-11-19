@@ -54,7 +54,7 @@ class TerminalChannel(Channel):
                     if not isinstance(text, str) or not isinstance(data.get("session_id", ""), str):
                         raise ValueError("input 和 session_id 必须为文本")
                     message = InboundMessage(str(data.get("request_id") or uuid4().hex),
-                                             self.channel_id, target, data.get("session_id", ""), text.strip(),
+                                             self.channel_id, target, data.get("session_id", ""), text,
                                              InboundType(data["type"]))
                     self.submit(message)
                 except (ValueError, KeyError, TypeError) as error:

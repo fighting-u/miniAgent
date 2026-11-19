@@ -174,13 +174,13 @@ class QQChannel(Channel):
         """将好友文本直接提交，网关继续接收后续消息。"""
         target = data.get("author", {}).get("user_openid")
         msg_id = data.get("id")
-        text = data.get("content", "").strip()
-        if not target or not msg_id or not text:
+        text = data.get("content", "")
+        if not target or not msg_id or not text.strip():
             logger.info("忽略非文本或不完整的 QQ 私聊消息：%s", self.channel_id)
             return
         request_id = f"{self.channel_id}:{msg_id}"
         # 当前实例携带自己的会话选择，历史和长期记忆仍可与其他入口共用。
-        message = InboundMessage(request_id, self.channel_id, target, self.session_id, text, input_type(text))
+        message = InboundMessage(request_id, self.channel_id, target, self.session_id, text, input_type(text.strip()))
         if request_id in self.replies:
             logger.info("忽略正在处理的重复 QQ 消息：%s", request_id)
             return
@@ -221,7 +221,7 @@ class QQChannel(Channel):
             entries = event["sessions"]
             text = "\n".join(f"{entry['id']}  {entry['preview']}" for entry in entries) or "暂无历史会话。"
             await self._send_text(reply, text + "\n恢复会话：/resume <会话ID>")
-        elif event_type in {"status", "error"}:
+        elif event_type in {"status", "error", "request_approval"}:
             await self._send_text(reply, event["text"])
         elif event_type == "done":
             try:

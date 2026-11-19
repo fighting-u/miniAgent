@@ -50,6 +50,17 @@ class TerminalClient:
                 self.ui.show_items(event["items"])
             elif kind in {"error", "status"}:
                 print(event["text"])
+            elif kind == "request_approval":
+                print(event["text"])
+                answer = (await self.ui.read_input()).strip()
+                while answer not in {"yes", "no"}:
+                    answer = (await self.ui.read_input()).strip()
+                await self.connection.send(json.dumps({
+                    "request_id": uuid4().hex,
+                    "session_id": event["session_id"],
+                    "type": InboundType.CHAT,
+                    "input": answer,
+                }))
             elif kind == "done":
                 return events
 
@@ -61,7 +72,7 @@ class TerminalClient:
             await self.request(request_type=InboundType.GET_HISTORY)
             while True:
                 try:
-                    text = await self.ui.read_input()
+                    text = (await self.ui.read_input()).strip()
                 except (EOFError, KeyboardInterrupt):
                     break
                 if not text:

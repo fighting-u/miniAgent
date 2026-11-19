@@ -1,3 +1,4 @@
+from asyncio import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ def get_owner_id(channel_id: str, reply_target: str) -> str:
 
 @dataclass
 class Session:
-    """集中保存单个会话的历史、存储进度和运行状态。"""
+    """单个会话的内存结构"""
 
     path: Path  # 本会话 JSONL 路径，文件名作为会话标识。
     messages: list[Any] = field(default_factory=list)  # 当前有效模型上下文。
@@ -22,6 +23,7 @@ class Session:
     pending_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     owner_id: str = ""  # 当前占用来源的唯一标识，由 get_owner_id 统一生成。
     expires_at: float = 0.0  # 单调时间的过期时刻；当前轮执行期间为无限大。
+    pending_approval: Future[bool] | None = None  # 等待用户审核敏感工具请求
 
     @property
     def id(self) -> str:

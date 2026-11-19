@@ -107,8 +107,9 @@ class MessageProcessor:
             raise ValueError("未知命令，可用命令：/new、/resume、/delete、/q")
 
     async def process_message(self, message: InboundMessage) -> None:
-        """按输入类型分发，会话占用判断先于并发名额等待。"""
+        """按输入类型分发，普通聊天优先匹配当前会话的待审批请求。"""
         try:
+            message.input = message.input.strip()
             # todo: 优化太多If,else
             if message.type == InboundType.GET_HISTORY:
                 await self._history(message)
@@ -118,10 +119,21 @@ class MessageProcessor:
                 async with self.max_concurrent_requests:
                     await self._command(message)
             elif message.input:
+                # 用户审批处理
+                requester_id = get_owner_id(message.channel_id, message.reply_target)
+                session = self.session_manager.sessions.get(message.session_id)
+                if session is not None and session.owner_id == requester_id and session.pending_approval is not None:
+                    approval = session.pending_approval
+                    if message.input in {"yes", "no"} and not approval.done():
+                        approval.set_result(message.input == "yes")
+                        logger.info("工具审批答复：session=%s answer=%s", session.id, message.input)
+                    # 审批期间的输入到此为止，finally 仍会发送 done 以清理通道回复记录。
+                    return
+
                 # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
                 # 按内存、磁盘、新建的顺序取得会话，/new 的标识到这里才创建对象。
-                session = self.session_manager.get_or_create(message.session_id)
-                requester_id = get_owner_id(message.channel_id, message.reply_target)
+                if session is None:
+                    session = self.session_manager.get_or_create(message.session_id)
                 if not self.session_manager.try_acquire_session_lock(session, requester_id):
                     logger.warning("会话占用冲突：session_id =%s 请求人=%s 会话当前的owner=%s", session.id, requester_id, session.owner_id)
                     await self.message_dispatcher.send(message, {"type": "error", "text": f"该会话已被 {session.owner_id} 占用，请稍后再试。"})

@@ -122,10 +122,10 @@ class TerminalUI:
         )
 
     async def read_input(self) -> str:
-        """读取一次有效用户输入，空白回车保留在同一个输入框。"""
+        """读取原始用户输入，空白回车保留在同一个输入框。"""
         # 等待输入时允许后台任务继续运行，后台输出自动避让当前输入框。
         with patch_stdout():
-            return (await self.prompt.prompt_async()).strip()
+            return await self.prompt.prompt_async()
 
     async def choose_session(self, sessions: list[dict[str, Any]], action: str = "恢复") -> str | None:
         """复用同一个会话选择列表，供恢复或删除使用，取消时不改变当前会话。"""

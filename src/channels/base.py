@@ -51,6 +51,7 @@ class Channel(ABC):
     async def start(self) -> bool:
         """启动协议连接或监听；成功返回 True，可跳过的连接失败返回 False。"""
 
+    # todo: event该重构为明确的数据类
     @abstractmethod
     async def send(self, reply_target: str, event: dict[str, Any]) -> None:
         """向本通道内的指定目标发送事件。"""
