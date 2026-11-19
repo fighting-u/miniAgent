@@ -15,16 +15,13 @@ from src.memory.memory import extract_memories, load_memories
 from src.session.session import Session
 from src.session.session_manager import SessionManager, serializable
 from src.system_prompt import build_system_prompt
-from src.tools.local_tools import PlanManager
+from src.tools.local_tools import Plan
 from src.tools.tool import ToolContext
 from src.tools.tool_manager import ToolManager
 
 
 # 记录模型请求、压缩重试和工具执行情况。
 logger = logging.getLogger(__name__)
-
-# 连续多少轮未更新计划后，向模型追加一次规划提醒。
-PLAN_REMINDER_INTERVAL = 5
 
 # 单次模型请求因上下文过长而进行响应式压缩的最大重试次数。
 MAX_REACTIVE_COMPACT_RETRIES = 1
@@ -71,15 +68,13 @@ class TurnRunner:
             messages = session.messages
             active_request = message.input
             # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
-            tool_context = ToolContext(plan=PlanManager())
+            tool_context = ToolContext(plan=Plan())
             # todo:感觉这个应该放别的地方，hook或者外层
             # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
             relevant_memories = await load_memories(self.client, messages, self.config)
             instructions = build_system_prompt(self.config, relevant_memories)
             # ToolManager 已在启动阶段注册工具，核心循环不处理初始化任务。
             available_tools = self.tool_manager.get_schemas()
-            # 记录连续多少轮工具调用没有使用计划工具。
-            rounds_since_plan = 0
             # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
             compactor = ContextCompactor(self.client, self.config)
             # 记录当前模型请求已进行的响应式压缩重试次数。
@@ -126,7 +121,6 @@ class TurnRunner:
 
                 # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
                 results = []
-                used_plan = False
                 for tool_call in tool_calls:
                     try:
                         # 这里是因为claude返回就是python字典，而openAI是json，要转换下
@@ -166,8 +160,6 @@ class TurnRunner:
                                     output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
                                     trigger_hooks("PostToolUse", tool_call, output)
 
-                                    if tool_call.name == "update_plan":
-                                        used_plan = True
                             except (json.JSONDecodeError, TypeError) as error:
                                 logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
                                 output = f"工具参数无效：{error}"
@@ -176,16 +168,12 @@ class TurnRunner:
                     await self.process_event(message, session, {"type": "items", "items": [result]})
                     results.append(result)
 
-                # 连续多轮未更新计划时，把当前计划和更新提醒一并追加给模型。
-                rounds_since_plan = 0 if used_plan else rounds_since_plan + 1
-                if rounds_since_plan >= PLAN_REMINDER_INTERVAL:
-                    reminder = {
-                        "role": "system",
-                        "content": f"系统提醒：当前已连续{PLAN_REMINDER_INTERVAL}轮没使用或更新任务计划，如果任务复杂或步骤多请使用 update_plan 更新任务计划。\n当前计划：{tool_context.plan.render()}",
-                    }
-                    await self.process_event(message, session, {"type": "items", "items": [reminder]})
-                    results.append(reminder)
-                    rounds_since_plan = 0
+                # 整批工具结果之后追加 Hook 可能返回的系统消息。
+                extra_input = trigger_hooks("PostToolBatch", tool_context)
+                if extra_input:
+                    extra_message = {"role": "system", "content": extra_input}
+                    await self.process_event(message, session, {"type": "items", "items": [extra_message]})
+                    results.append(extra_message)
                 messages.extend(results)
         except BaseException:
             # 轮次中断后以内存外的原始记录重建历史，下轮再补齐缺失工具结果。

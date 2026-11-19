@@ -150,12 +150,16 @@ def run_glob(
         return f"Error: {error}"
 
 
-class PlanManager:
-    """保存、校验并展示当前 turn 的任务计划。"""
+class Plan:
+    """保存、校验并展示当前 turn 的任务计划，按工具批次生成提醒。"""
+
+    # 连续多少批工具未更新计划后，向模型追加一次提醒。
+    REMINDER_INTERVAL = 5
 
     def __init__(self) -> None:
-        """初始化空的计划清单。"""
+        """初始化空的计划清单和未更新计数。"""
         self.items: list[dict[str, str]] = []
+        self._batches_without_update = 0
 
     def update(self, plan: list[Any] | str) -> str:
         """校验并整体替换当前计划，然后返回渲染后的计划文本。"""
@@ -193,7 +197,27 @@ class PlanManager:
             raise ValueError("同一时间只能有一条计划处于 in_progress 状态。")
 
         self.items = validated
-        return self.render()
+        # 批末会统一加 1，让成功更新计划的这一批以 0 结束。
+        self._batches_without_update = -1
+        return "计划更新成功"
+
+    def check_reminder(self) -> str | None:
+        """在一批工具调用结束后推进计数，达到阈值时返回提醒并清零。"""
+        self._batches_without_update += 1
+        if self._batches_without_update < self.REMINDER_INTERVAL:
+            return None
+
+        self._batches_without_update = 0
+        logger.info("连续 %d 批工具调用未更新计划，向模型追加提醒", self.REMINDER_INTERVAL)
+        if not self.items:
+            return (
+                f"系统提醒：当前已连续进行 {self.REMINDER_INTERVAL} 批工具调用，但尚未创建任务计划。"
+                "如果当前任务复杂或步骤较多，请使用 update_plan 创建计划。"
+            )
+        return (
+            f"系统提醒：已连续 {self.REMINDER_INTERVAL} 批工具调用未更新任务计划。"
+            f"请核对实际进度，如有变化请使用 update_plan 更新计划。\n当前计划：{self.render()}"
+        )
 
     def render(self) -> str:
         """把当前计划渲染为便于模型和终端阅读的文本。"""
@@ -210,12 +234,13 @@ class PlanManager:
         return "\n".join(lines)
 
 
-# 当前 turn 的计划管理器由 Agent 随工具调用传入，供本轮工具使用。
+# 当前 turn 的计划由 Agent 随工具调用传入，供本轮工具使用。
 async def run_update_plan(plan: list[Any] | str, *, context: ToolContext) -> str:
     """在事件循环内更新当前 turn 的计划，展示由工具结果事件交给通道完成。"""
     try:
         output = context.plan.update(plan)
     except ValueError as error:
+        logger.warning("当前 turn 的计划更新失败：%s", error)
         return f"错误：{error}"
     logger.info("当前 turn 计划已更新")
     return output

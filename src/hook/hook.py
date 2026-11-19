@@ -4,6 +4,7 @@ from typing import Any, Callable
 
 from src.config import Config
 from src.tools.local_tools import is_allowed_path
+from src.tools.tool import ToolContext
 
 
 # 当前模块使用的日志记录器。
@@ -41,6 +42,7 @@ HOOKS: dict[str, list[Callable[..., Any]]] = {
     "PreUserPromptSubmit": [],
     "PreToolUse": [],
     "PostToolUse": [],
+    "PostToolBatch": [],
     "Stop": [],
 }
 
@@ -130,6 +132,11 @@ def large_output_hook(tool_call: Any, output: str) -> None:
     return None
 
 
+def plan_reminder_hook(context: ToolContext) -> str | None:
+    """在整批工具调用结束后检查是否需要提醒模型更新计划。"""
+    return context.plan.check_reminder()
+
+
 def summary_hook(messages: list[Any]) -> None:
     """从最后一条用户消息开始，统计本轮产生的工具调用结果数量。"""
     last_user_index = next(
@@ -154,4 +161,5 @@ register_hook("PreUserPromptSubmit", workdir_log_hook)
 register_hook("PreToolUse", tool_request_log_hook)
 register_hook("PostToolUse", tool_output_log_hook)
 register_hook("PostToolUse", large_output_hook)
+register_hook("PostToolBatch", plan_reminder_hook)
 register_hook("Stop", summary_hook)

@@ -2,14 +2,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
-    from src.tools.local_tools import PlanManager
+    from src.tools.local_tools import Plan
 
 
 @dataclass
 class ToolContext:
     """保存工具调用所需的本轮状态，由 Agent 为每个 turn 单独创建。"""
 
-    plan: "PlanManager"  # 当前 turn 的任务计划。
+    plan: "Plan"  # 当前 turn 的任务计划。
 
 
 @dataclass

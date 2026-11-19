@@ -50,6 +50,7 @@ class ToolManager:
         is_async = iscoroutinefunction(func)
         properties = parameters["properties"]
 
+        # 装饰器
         async def execute(arguments: dict[str, Any], context: ToolContext) -> Any:
             """校验模型参数，避免覆盖注册时绑定或由 Agent 传入的内部依赖。"""
             if unexpected := arguments.keys() - properties.keys():
