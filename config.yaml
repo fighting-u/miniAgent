@@ -6,6 +6,9 @@ model: qwen3.7-flash
 base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
 # 模型密钥的环境变量名；密钥值保留在本地 .env。
 api_key_env: DASHSCOPE_API_KEY
+# 由模型服务端执行的工具类型，当前启用千问的联网搜索。
+model_hosted_tools:
+- web_search
 
 
 # 工具权限相关配置

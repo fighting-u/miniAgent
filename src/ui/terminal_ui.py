@@ -203,6 +203,9 @@ class TerminalUI:
             elif kind == "function_call_output":
                 label = "工具结果"
                 text = str(item_value(item, "output", ""))
+            elif kind == "web_search_call":
+                label = "联网搜索"
+                text = str(item_value(item, "action", ""))
             else:
                 continue
             if kind != "message" and len(text) > DETAIL_PREVIEW_CHARS:

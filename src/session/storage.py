@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 API_FORMAT = "openai_responses"
 
 # 本阶段支持的 Responses 上下文项类型，未知类型明确报错。
-MESSAGE_TYPES = {"message", "reasoning", "function_call", "function_call_output"}
+MESSAGE_TYPES = {"message", "reasoning", "function_call", "function_call_output", "web_search_call"}
 
 
 def omit_none(value: Any) -> Any:

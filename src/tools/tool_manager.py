@@ -22,7 +22,7 @@ from src.tools.tool import Tool, ToolContext
 logger = logging.getLogger(__name__)
 
 class ToolManager:
-    """管理本地和 MCP 工具的注册与生命周期，提供 schema 和调用入口。"""
+    """管理本地和 MCP 工具的执行，汇总这两类工具和模型托管工具的声明。"""
 
     def __init__(self, config: Config) -> None:
         """创建各 turn 共用的工具注册表和 MCP 管理器。"""
@@ -155,7 +155,7 @@ class ToolManager:
             session.messages.append(extra_message)
 
     def get_schemas(self) -> list[dict[str, Any]]:
-        """从已注册工具生成 OpenAI Responses 的 function 工具定义。"""
+        """汇总 Responses API 所需的函数工具和模型托管工具定义。"""
         schemas = []
         for tool in self._tools.values():
             schema: dict[str, Any] = {
@@ -167,4 +167,5 @@ class ToolManager:
             if tool.strict is not None:
                 schema["strict"] = tool.strict
             schemas.append(schema)
+        schemas.extend({"type": tool_type} for tool_type in self._config.model_hosted_tools)
         return schemas

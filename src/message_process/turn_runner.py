@@ -86,7 +86,7 @@ class TurnRunner:
                 )
                 messages.extend(response.output)
 
-                # 从模型本轮输出中筛选所有函数工具调用。
+                # 从模型本轮输出中筛选所有函数工具调用；托管工具已由模型服务端执行。
                 tool_calls = [item for item in response.output if item.type == "function_call"]
 
                 # 没有工具调用时，模型已经给出最终答案，本次 Agent 循环结束。

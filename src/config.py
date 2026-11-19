@@ -26,6 +26,7 @@ class Config:
     powershell_timeout: int = 120  # PowerShell 工具的单次执行秒数。
     channels: list[dict[str, Any]] = field(default_factory=list, repr=False)  # 通道实例配置，解析后可能包含密钥。
     mcp_servers: dict[str, Any] = field(default_factory=dict, repr=False)  # MCP 服务器配置，可能包含认证信息。
+    model_hosted_tools: list[str] = field(default_factory=list)  # 由模型服务端执行的工具类型。
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> "Config":
@@ -54,6 +55,10 @@ class Config:
             raise ValueError("base_url 必须是文本或 null")
         if not isinstance(config.channels, list) or not isinstance(config.mcp_servers, dict):
             raise ValueError("channels 必须是列表，mcp_servers 必须是对象")
+        if not isinstance(config.model_hosted_tools, list) or any(
+            tool_type != "web_search" for tool_type in config.model_hosted_tools
+        ):
+            raise ValueError("model_hosted_tools 必须是列表，目前仅支持 web_search")
         seen = set()
         for item in config.channels:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
