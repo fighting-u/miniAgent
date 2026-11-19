@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -18,7 +19,6 @@ from src.system_prompt import build_system_prompt
 from src.tools.local_tools import Plan
 from src.tools.tool import ToolContext
 from src.tools.tool_manager import ToolManager
-
 
 # 记录模型请求、压缩重试和工具执行情况。
 logger = logging.getLogger(__name__)
@@ -68,11 +68,11 @@ class TurnRunner:
             messages = session.messages
             current_request = inbound_message.input
             # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
-            # 当前通道未提供工作目录，在 turn 入口使用配置中的目录。
-            tool_context = ToolContext(plan=Plan(), current_working_directory=self.config.workdir)
+            # 当前通道未提供工作目录，在 turn 入口取常驻进程的当前目录。
+            tool_context = ToolContext(plan=Plan(), cwd=Path.cwd().resolve())
             # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
             relevant_memories = await load_memories(self.client, messages, self.config)
-            instructions = build_system_prompt(self.config, relevant_memories)
+            instructions = build_system_prompt(self.config, tool_context.cwd, relevant_memories)
             # ToolManager 已在启动阶段注册工具，核心循环不处理初始化任务。
             available_tools = self.tool_manager.get_schemas()
             # 当前任务使用同一个压缩器，负责请求前压缩和超限后的单次补救。
@@ -86,9 +86,7 @@ class TurnRunner:
                 messages[:] = await compactor.prepare(messages, current_request)
                 # 发送当前对话，请求模型继续推理或调用工具。
                 try:
-                    response = await self.client.responses.create(
-                        model=model_name, instructions=instructions, input=messages, tools=available_tools
-                    )
+                    response = await self.client.responses.create(model=model_name, instructions=instructions, input=messages, tools=available_tools)
                     # print(response.output)
                     reactive_retries = 0
                 except Exception as error:
@@ -99,9 +97,7 @@ class TurnRunner:
                         continue
                     raise
                 # 按响应原始顺序落盘并分发推理、工具调用和回答，然后才执行工具。
-                await self.process_event(inbound_message, session, {
-                    "type": "items", "items": response.output, "model_name": model_name,
-                })
+                await self.process_event(inbound_message, session, {"type": "items", "items": response.output, "model_name": model_name})
                 messages.extend(response.output)
 
                 # 从模型本轮输出中筛选所有函数工具调用。
@@ -132,12 +128,15 @@ class TurnRunner:
                         blocked = trigger_hooks("PreToolUse", tool_call, arguments)
                         # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
                         denied = check_powershell_deny_command(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
-                        reason = check_approval_required(tool_call.name, arguments, self.config) if denied is None else None
+                        reason = check_approval_required(tool_call.name, arguments, self.config, tool_context) if denied is None else None
                         if blocked is None:
                             if reason:
                                 permission = {
-                                    "type": "permission", "name": tool_call.name, "arguments": arguments,
-                                    "reason": reason, "allowed": False,
+                                    "type": "permission",
+                                    "name": tool_call.name,
+                                    "arguments": arguments,
+                                    "reason": reason,
+                                    "allowed": False,
                                 }
                                 # 处理事件时填写审批结果，再决定是否执行；审批异常由轮次恢复处理。
                                 await self.process_event(inbound_message, session, permission)
@@ -170,5 +169,4 @@ class TurnRunner:
             self.session_manager.reload(session)
             raise
         # Agent 正常结束后，提取本轮快照，不受后续追加和压缩影响。
-        self.background_tasks.append(asyncio.create_task(
-            extract_memories(self.client, deepcopy(session.messages), self.config)))
+        self.background_tasks.append(asyncio.create_task(extract_memories(self.client, deepcopy(session.messages), self.config)))

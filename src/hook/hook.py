@@ -1,10 +1,10 @@
 import logging
-import re
+from pathlib import Path
 from typing import Any, Callable
 
 from src.config import Config
+from src.tools.local_tools import resolve_path
 from src.tools.tool import ToolContext
-
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
@@ -20,28 +20,11 @@ DENY_LIST = [
     ("shutdown"),
 ]
 
-# 用于识别 PowerShell 删除命令及其常用别名的正则表达式。
-DESTRUCTIVE_COMMAND_WORD = re.compile(
-    r"(?i)(?:^|[;&|()\r\n])\s*(?:remove-item|del|erase|rd|rmdir|clear-content)(?=\s|$|[;&|()])"
-)
-
-# 需要用户审批的 PowerShell 敏感操作关键词，匹配时忽略大小写。
-POWERSHELL_SENSITIVE_KEYWORDS = [
-    "set-content ",
-    "out-file ",
-    "set-acl ",
-    "icacls ",
-    "takeown ",
-]
+# PowerShell 命令同时包含这组关键词时，需要审批。
+POWERSHELL_APPROVAL_KEYWORDS = ("remove-item", "-recurse")
 
 # Hook 事件注册表，用于在核心流程的固定位置挂载外部扩展逻辑。
-HOOKS: dict[str, list[Callable[..., Any]]] = {
-    "PreUserPromptSubmit": [],
-    "PreToolUse": [],
-    "PostToolUse": [],
-    "PostToolBatch": [],
-    "Stop": [],
-}
+HOOKS: dict[str, list[Callable[..., Any]]] = {"PreUserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "PostToolBatch": [], "Stop": []}
 
 
 def trigger_hooks(event: str, *args: Any) -> Any | None:
@@ -58,34 +41,10 @@ def register_hook(event: str, callback: Callable[..., Any]) -> None:
     HOOKS[event].append(callback)
 
 
-def contains_destructive_command(command: str) -> bool:
-    """判断 PowerShell 命令中是否包含删除或清空内容的操作。"""
-    return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
-
-
-def is_outside_allowed_dirs(args: dict[str, Any], config: Config) -> bool:
-    """判断文件工具的目标路径是否在所有允许目录之外。"""
-    path = (config.workdir / str(args.get("path", ""))).resolve()
-    return not any(path.is_relative_to(root) for root in (config.workdir, *config.extra_allowed_dirs))
-
-
-# 第二重闸门的敏感操作规则，命中后需要进入用户审批流程。
-PERMISSION_RULES = [
-    {
-        "tools": ["read_file", "write_file", "edit_file"],
-        "check": is_outside_allowed_dirs,
-        "message": "访问允许的目录之外的文件夹或文件",
-    },
-    {
-        "tools": ["powershell"],
-        "check": lambda args, config: contains_destructive_command(str(args.get("command", "")))
-        or any(
-            keyword in str(args.get("command", "")).casefold()
-            for keyword in POWERSHELL_SENSITIVE_KEYWORDS
-        ),
-        "message": "潜在的破坏性 PowerShell 命令",
-    },
-]
+def check_powershell_sensitive_command(command: str) -> bool:
+    """忽略大小写判断 PowerShell 命令是否同时包含删除和递归关键词。"""
+    normalized_command = command.casefold()
+    return all(keyword in normalized_command for keyword in POWERSHELL_APPROVAL_KEYWORDS)
 
 
 def check_powershell_deny_command(command: str) -> str | None:
@@ -97,19 +56,46 @@ def check_powershell_deny_command(command: str) -> str | None:
     return None
 
 
-def check_approval_required(tool_name: str, tool_input: dict[str, Any], config: Config) -> str | None:
+def is_outside_allowed_dirs(path: str | None, config: Config, context: ToolContext) -> bool:
+    """以本轮工作目录解析指定路径，判断它是否在所有允许目录之外。"""
+    resolved_path = resolve_path(path if path is not None else ".", context)
+    return not any(resolved_path.is_relative_to(root) for root in (context.cwd, *config.allowed_dirs))
+
+
+# 第二重闸门的敏感操作规则，命中后需要进入用户审批流程。
+PERMISSION_RULES = [
+    {
+        "tools": ["read_file", "write_file", "edit_file"],
+        "check": lambda args, config, context: is_outside_allowed_dirs(args.get("path"), config, context),
+        "message": "访问允许的目录之外的文件夹或文件",
+    },
+    {
+        "tools": ["powershell", "glob"],
+        "check": lambda args, config, context: is_outside_allowed_dirs(args.get("workdir"), config, context),
+        "message": "工作目录在允许范围之外",
+    },
+    {
+        "tools": ["powershell"],
+        "check": lambda args, _config, _context: check_powershell_sensitive_command(str(args.get("command", ""))),
+        "message": "PowerShell 递归删除操作",
+    },
+]
+
+
+def check_approval_required(tool_name: str, tool_args: dict[str, Any], config: Config, context: ToolContext) -> str | None:
     """按照权限规则检查工具调用是否需要用户审批。"""
     for rule in PERMISSION_RULES:
-        if tool_name in rule["tools"] and rule["check"](tool_input, config):
+        if tool_name in rule["tools"] and rule["check"](tool_args, config, context):
             return rule["message"]
     return None
 
 
 # 权限闸门保留以上规则；交互审批由 Agent 事件和 Runtime 审批代理完成。
 
-def workdir_log_hook(config: Config) -> None:
+
+def workdir_log_hook(cwd: Path) -> None:
     """在读取用户输入前输出当前工作目录。"""
-    logger.info("[Hook] 当前工作目录：%s", config.workdir)
+    logger.info("[Hook] 当前工作目录：%s", cwd)
     return None
 
 
@@ -141,18 +127,9 @@ def plan_reminder_hook(context: ToolContext) -> str | None:
 def summary_hook(messages: list[Any]) -> None:
     """从最后一条用户消息开始，统计本轮产生的工具调用结果数量。"""
     last_user_index = next(
-        (
-            index
-            for index in range(len(messages) - 1, -1, -1)
-            if isinstance(messages[index], dict) and messages[index].get("role") == "user"
-        ),
-        -1,
+        (index for index in range(len(messages) - 1, -1, -1) if isinstance(messages[index], dict) and messages[index].get("role") == "user"), -1
     )
-    tool_count = sum(
-        1
-        for message in messages[last_user_index + 1 :]
-        if isinstance(message, dict) and message.get("type") == "function_call_output"
-    )
+    tool_count = sum(1 for message in messages[last_user_index + 1 :] if isinstance(message, dict) and message.get("type") == "function_call_output")
     logger.info("[Hook] 本轮请求共产生 %d 个工具结果", tool_count)
     return None
 

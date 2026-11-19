@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from openai import AsyncOpenAI
 
@@ -60,7 +61,7 @@ class MessageProcessor:
             self.session_manager.bind(message.channel_id, "")
         message.session_id = session_id
         await self.message_dispatcher.send(
-            message, {"type": "session", "title": title, "items": items, "model": self.config.model, "workdir": str(self.config.workdir)}
+            message, {"type": "session", "title": title, "items": items, "model": self.config.model, "workdir": str(Path.cwd().resolve())}
         )
         logger.info("入口已选择会话：channel=%s session=%s", message.channel_id, session_id)
 
@@ -75,7 +76,7 @@ class MessageProcessor:
                 "title": "会话历史" if message.session_id else "新会话",
                 "items": items,
                 "model": self.config.model,
-                "workdir": str(self.config.workdir),
+                "workdir": str(Path.cwd().resolve()),
             },
         )
 
@@ -140,7 +141,7 @@ class MessageProcessor:
                     # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
                     await self.message_dispatcher.send(message, {"type": "session_created"})
                 async with self.max_concurrent_requests:
-                    trigger_hooks("PreUserPromptSubmit", self.config)
+                    trigger_hooks("PreUserPromptSubmit", Path.cwd().resolve())
                     self.session_manager.start_turn(session, message.input)
                     self.session_manager.bind(message.channel_id, session.id)
                     await self.turn_runner.run_turn(message)

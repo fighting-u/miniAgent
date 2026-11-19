@@ -1,18 +1,21 @@
+from pathlib import Path
+
 from src.config import Config, PROJECT_ROOT
 from src.memory.memory import memory_catalog
 from src.tools.skill import SKILLS_DIR_NAME, SkillLoader
 
 
-def build_system_prompt(config: Config, relevant_memories: str = "") -> str:
+def build_system_prompt(config: Config, cwd: Path, relevant_memories: str = "") -> str:
     """构建系统提示词，注入技能目录、记忆目录和本轮自动召回内容。"""
+    allowed_dirs = "、".join(str(path) for path in dict.fromkeys((cwd, *config.allowed_dirs)))
     recalled_section = (
         f"\n\n与本轮请求相关的已召回记忆：\n{relevant_memories}"
         if relevant_memories
         else ""
     )
     return (
-        f"你是一个运行在 Windows 环境，命令行工具为PowerShell的智能体。当前工作目录为 {config.workdir}。\n"
-        f"文件工具额外允许访问以下目录及其子目录：{'、'.join(str(path) for path in config.extra_allowed_dirs)}。相对路径仍以当前工作目录为基准。\n"
+        f"你是一个运行在 Windows 环境，命令行工具为PowerShell的智能体。当前工作目录为 {cwd}。\n"
+        f"文件工具允许访问以下目录及其子目录：{allowed_dirs}。相对路径仍以当前工作目录为基准。\n"
         "三步以上的复杂任务或者一次提出多个任务时，建议使用 update_plan 工具先创建计划。\n\n"
         f"可用技能：\n{SkillLoader(PROJECT_ROOT / SKILLS_DIR_NAME).catalog()}\n\n"
         "当某项技能适用于当前任务时，先使用 load_skill 工具读取它的完整说明，再按照说明执行。\n"

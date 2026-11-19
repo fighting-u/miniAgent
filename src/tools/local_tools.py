@@ -23,7 +23,7 @@ def resolve_path(path: str, context: ToolContext) -> Path:
     """以本轮工作目录为基准解析路径。"""
     # 这里的 / 是 pathlib.Path 重载的路径拼接运算符，不是简单的字符串拼接。
     # 当右侧是完整的绝对路径时，会直接采用右侧路径，舍弃左侧的工作区。
-    return (context.current_working_directory / path).resolve()
+    return (context.cwd / path).resolve()
 
 
 def run_get_model_name(*, model_name: str) -> str:
@@ -237,7 +237,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "workdir": {"type": "string", "description": "执行命令的目录，可用绝对路径或相对于默认工作区的路径，省略时使用默认工作区。"},
+                "workdir": {"type": "string", "description": "执行命令的目录，可用绝对路径或相对于本轮当前目录的路径，省略时使用本轮当前目录。"},
             },
             "required": ["command"],
             "additionalProperties": False,
@@ -293,7 +293,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "type": "object",
             "properties": {
                 "pattern": {"type": "string"},
-                "workdir": {"type": "string", "description": "搜索起点，可用绝对路径或相对于默认工作区的路径，省略时使用默认工作区。"},
+                "workdir": {"type": "string", "description": "搜索起点，可用绝对路径或相对于本轮当前目录的路径，省略时使用本轮当前目录。"},
             },
             "required": ["pattern"],
             "additionalProperties": False,

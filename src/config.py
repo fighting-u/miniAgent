@@ -6,7 +6,6 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-
 # 项目根目录作为正式运行的默认路径基准，不依赖启动命令所在目录。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 默认配置文件名；密钥仍单独保存在未纳入版本控制的 .env 中。
@@ -21,8 +20,7 @@ class Config:
     base_url: str | None = None  # OpenAI 兼容接口地址；为空时使用 SDK 默认地址。
     api_key_env: str = "DASHSCOPE_API_KEY"  # 从环境读取模型密钥的变量名。
     api_key: str = field(default="", repr=False)  # 已解析的模型密钥，不出现在配置对象的打印结果中。
-    workdir: Path = PROJECT_ROOT  # 文件工具和 PowerShell 使用的工作区。
-    extra_allowed_dirs: tuple[Path, ...] = ()  # 工作区之外额外允许访问的目录。
+    allowed_dirs: tuple[Path, ...] = ()  # 本轮当前目录之外，权限规则允许访问的目录。
     max_concurrent_requests: int = 10  # 同时处理请求的最大数量。
     session_owner_ttl: int = 60  # 当前轮执行结束后，原来源继续占用的秒数。
     powershell_timeout: int = 120  # PowerShell 工具的单次执行秒数。
@@ -43,9 +41,7 @@ class Config:
         if "api_key" in settings:
             raise ValueError("请通过 api_key_env 指定密钥环境变量，不要把密钥写入 YAML")
         config = cls(**settings)
-        config.workdir = (path.parent / Path(config.workdir).expanduser()).resolve()
-        config.extra_allowed_dirs = tuple((path.parent / Path(value).expanduser()).resolve()
-                                          for value in config.extra_allowed_dirs)
+        config.allowed_dirs = tuple((path.parent / Path(value).expanduser()).resolve() for value in config.allowed_dirs)
         if type(config.max_concurrent_requests) is not int or config.max_concurrent_requests <= 0:
             raise ValueError("max_concurrent_requests 必须为正整数")
         if type(config.session_owner_ttl) is not int or config.session_owner_ttl < 0:

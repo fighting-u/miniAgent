@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 
 from openai import AsyncOpenAI
 
@@ -47,7 +48,7 @@ class AgentRuntime:
         # 通道收到输入后立即提交，先准备工具，保证请求执行时工具已就绪。
         await self.tool_manager.start()
         await self.channels.start()
-        logger.info("AgentRuntime 已启动：model=%s workdir=%s", self.config.model, self.config.workdir)
+        logger.info("AgentRuntime 已启动：model=%s cwd=%s", self.config.model, Path.cwd().resolve())
 
     def submit(self, message: InboundMessage | ChannelDisconnected) -> None:
         """只创建和登记输入任务，提交后立即返回，不等待业务处理。"""

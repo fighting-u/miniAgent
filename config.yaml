@@ -9,12 +9,11 @@ api_key_env: DASHSCOPE_API_KEY
 
 
 # 工具权限相关配置
-# 文件工具与 PowerShell 的工作区，相对本配置文件解析。
-workdir: .
 # PowerShell 单次执行的最长秒数。
 powershell_timeout: 120
-# 文件工具额外允许访问的目录及其子目录，不限制任意 PowerShell 命令。
-extra_allowed_dirs:
+# 允许目录及其子目录，相对路径以本配置文件所在目录为基准。
+allowed_dirs:
+- .
 - D:/projects/others/interview_post_crawl/面经
 
 # AgentRuntime 同时处理请求的最大数量。
