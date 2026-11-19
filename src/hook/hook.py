@@ -10,17 +10,15 @@ from src.tools.tool import ToolContext
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
 
-# 第一重闸门的 PowerShell 高危命令片段，命中后直接拒绝执行。
+# 第一重闸门的 PowerShell 高危命令关键词组，同组关键词全部命中时直接拒绝执行。
 DENY_LIST = [
-    "remove-item -recurse -force c:\\",
-    "remove-item -force -recurse c:\\",
-    "format-volume",
-    "clear-disk",
-    "initialize-disk",
-    "stop-computer",
-    "restart-computer",
-    "shutdown /s",
-    "shutdown /r",
+    ("remove-item", "c:\\"),
+    ("format-volume",),
+    ("clear-disk",),
+    ("initialize-disk",),
+    ("stop-computer",),
+    ("restart-computer",),
+    ("shutdown"),
 ]
 
 # 用于识别 PowerShell 删除命令及其常用别名的正则表达式。
@@ -88,11 +86,11 @@ PERMISSION_RULES = [
 
 
 def check_deny_list(command: str) -> str | None:
-    """检查 PowerShell 命令是否命中硬拒绝名单。"""
+    """忽略大小写检查命令是否包含某条硬拒绝规则的全部关键词。"""
     normalized_command = command.casefold()
-    for pattern in DENY_LIST:
-        if pattern in normalized_command:
-            return f"Blocked: '{pattern}' is on the deny list"
+    for keywords in DENY_LIST:
+        if all(keyword in normalized_command for keyword in keywords):
+            return f"系统消息：该命令是高危命令，不允许执行，请检查命令合理性或向用户反馈。"
     return None
 
 

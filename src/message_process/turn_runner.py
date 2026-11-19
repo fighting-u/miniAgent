@@ -49,27 +49,26 @@ class TurnRunner:
         self.approvals = approvals
         self.background_tasks = background_tasks
 
-    async def process_event(self, message: InboundMessage, session: Session, event: dict[str, Any]) -> None:
+    async def process_event(self, inbound_message: InboundMessage, session: Session, event: dict[str, Any]) -> None:
         """原始事件先落盘再分发，审批事件在原对象中填写决定。"""
         if event["type"] == "items":
             for item in event["items"]:
                 self.session_manager.append(session, item, model_name=event.get("model_name"))
-            await self.message_dispatcher.send(message, {"type": "items", "items": [serializable(item) for item in event["items"]]})
+            await self.message_dispatcher.send(inbound_message, {"type": "items", "items": [serializable(item) for item in event["items"]]})
         elif event["type"] == "permission":
-            event["allowed"] = await self.approvals.request(message, event)
+            event["allowed"] = await self.approvals.request(inbound_message, event)
         else:
-            await self.message_dispatcher.send(message, event)
+            await self.message_dispatcher.send(inbound_message, event)
 
     # 核心
-    async def run_turn(self, message: InboundMessage) -> None:
+    async def run_turn(self, inbound_message: InboundMessage) -> None:
         """用户输入已落盘，由调用方取得会话占用后循环请求模型、执行工具并处理事件。"""
-        session = self.session_manager.get(message.session_id)
+        session = self.session_manager.get(inbound_message.session_id)
         try:
             messages = session.messages
-            active_request = message.input
+            current_request = inbound_message.input
             # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
             tool_context = ToolContext(plan=Plan())
-            # todo:感觉这个应该放别的地方，hook或者外层
             # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
             relevant_memories = await load_memories(self.client, messages, self.config)
             instructions = build_system_prompt(self.config, relevant_memories)
@@ -82,8 +81,8 @@ class TurnRunner:
             # 固定本轮使用的模型名称，也用于持久化元信息。
             model_name = self.config.model
             while True:
-                # 每次请求模型前依次执行确定性裁剪，必要时再生成历史摘要。
-                messages[:] = await compactor.prepare(messages, active_request)
+                # 上下文压缩
+                messages[:] = await compactor.prepare(messages, current_request)
                 # 发送当前对话，请求模型继续推理或调用工具。
                 try:
                     response = await self.client.responses.create(
@@ -94,12 +93,12 @@ class TurnRunner:
                 except Exception as error:
                     if is_context_length_error(error) and reactive_retries < MAX_REACTIVE_COMPACT_RETRIES:
                         logger.warning("模型请求因上下文过长被拒绝，开始响应式压缩并重试")
-                        messages[:] = await compactor.reactive_compact(messages, active_request)
+                        messages[:] = await compactor.reactive_compact(messages, current_request)
                         reactive_retries += 1
                         continue
                     raise
                 # 按响应原始顺序落盘并分发推理、工具调用和回答，然后才执行工具。
-                await self.process_event(message, session, {
+                await self.process_event(inbound_message, session, {
                     "type": "items", "items": response.output, "model_name": model_name,
                 })
                 messages.extend(response.output)
@@ -114,7 +113,7 @@ class TurnRunner:
                     if extra_input is not None:
                         # Harness 的续跑要求属于系统提示，不冒充真实用户输入。
                         extra_message = {"role": "system", "content": extra_input}
-                        await self.process_event(message, session, {"type": "items", "items": [extra_message]})
+                        await self.process_event(inbound_message, session, {"type": "items", "items": [extra_message]})
                         messages.append(extra_message)
                         continue
                     break
@@ -130,17 +129,9 @@ class TurnRunner:
 
                         # 工具执行前触发 Hook，返回非 None 值时跳过本次工具调用。
                         blocked = trigger_hooks("PreToolUse", tool_call, arguments)
-                        if blocked is not None:
-                            # todo: 这里给llm的反馈太笼统了，后续可优化细分
-                            output = str(blocked)
-                        else:
-                            # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
-                            denied = check_deny_list(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
-                            reason = check_rules(tool_call.name, arguments, self.config) if denied is None else None
-                    except (json.JSONDecodeError, TypeError) as error:
-                        logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
-                        output = f"工具参数无效：{error}"
-                    else:
+                        # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
+                        denied = check_deny_list(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
+                        reason = check_rules(tool_call.name, arguments, self.config) if denied is None else None
                         if blocked is None:
                             if reason:
                                 permission = {
@@ -148,31 +139,29 @@ class TurnRunner:
                                     "reason": reason, "allowed": False,
                                 }
                                 # 处理事件时填写审批结果，再决定是否执行；审批异常由轮次恢复处理。
-                                await self.process_event(message, session, permission)
+                                await self.process_event(inbound_message, session, permission)
                                 if not permission["allowed"]:
                                     denied = "权限被拒绝。"
-                            try:
-                                if denied:
-                                    logger.warning("工具 %s 被权限策略拒绝：%s", tool_call.name, denied)
-                                    output = denied
-                                else:
-                                    # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
-                                    output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
-                                    trigger_hooks("PostToolUse", tool_call, output)
-
-                            except (json.JSONDecodeError, TypeError) as error:
-                                logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
-                                output = f"工具参数无效：{error}"
+                            if denied:
+                                logger.warning("工具 %s 被权限策略拒绝：%s", tool_call.name, denied)
+                                output = denied
+                            else:
+                                # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
+                                output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
+                                trigger_hooks("PostToolUse", tool_call, output)
+                    except (json.JSONDecodeError, TypeError) as error:
+                        logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
+                        output = f"工具参数无效：{error}"
 
                     result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": output}
-                    await self.process_event(message, session, {"type": "items", "items": [result]})
+                    await self.process_event(inbound_message, session, {"type": "items", "items": [result]})
                     results.append(result)
 
                 # 整批工具结果之后追加 Hook 可能返回的系统消息。
                 extra_input = trigger_hooks("PostToolBatch", tool_context)
                 if extra_input:
                     extra_message = {"role": "system", "content": extra_input}
-                    await self.process_event(message, session, {"type": "items", "items": [extra_message]})
+                    await self.process_event(inbound_message, session, {"type": "items", "items": [extra_message]})
                     results.append(extra_message)
                 messages.extend(results)
         except BaseException:
