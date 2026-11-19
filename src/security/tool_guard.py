@@ -1,26 +1,16 @@
-from dataclasses import dataclass
-from enum import Enum
+import asyncio
+import logging
 from typing import Any
 
+from src.channels.base import InboundMessage, MessageDispatcher
 from src.config import Config
+from src.session.session import Session
 from src.tools.local_tools import resolve_path
 from src.tools.tool import ToolContext
 
 
-class ToolDecision(str, Enum):
-    """工具请求的审计结论。"""
-
-    ALLOW = "allow"  # 通过检查，可以执行。
-    DENY = "deny"  # 命中硬拒绝规则。
-    REQUIRE_APPROVAL = "require_approval"  # 命中需要用户审批的规则。
-
-
-@dataclass(frozen=True)
-class ToolAuditResult:
-    """汇总安全检查的结论和反馈。"""
-
-    decision: ToolDecision  # 工具请求的审计结论。
-    feedback: str  # 拒绝或需要审批的原因，通过时为空。
+# 记录工具审计和审批分支。
+logger = logging.getLogger(__name__)
 
 
 # 第一重闸门的 PowerShell 高危命令关键词组，同组关键词全部命中时直接拒绝执行。
@@ -86,13 +76,37 @@ def check_approval_required(tool_name: str, tool_args: dict[str, Any], config: C
     return None
 
 
-def audit_tool_request(tool_name: str, tool_args: dict[str, Any], config: Config, context: ToolContext) -> ToolAuditResult:
-    """依次检查硬拒绝和审批规则，命中后立即返回对应结论。"""
+async def request_tool_approval(
+    tool_name: str, arguments: dict[str, Any], session: Session,
+    inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
+) -> str | None:
+    """在同一会话内排队等待用户审批，返回 None 表示通过，返回字符串作为工具结果。"""
+    async with session.approval_lock:
+        pending_approval = asyncio.get_running_loop().create_future()
+        session.pending_approval = pending_approval
+        try:
+            sent = await message_dispatcher.send(
+                inbound_message, {"type": "request_approval", "text": f"模型请求调用工具 {tool_name} ，参数：{arguments}\n请输入 yes 或 no进行审核"}
+            )
+            if not sent:
+                return "该工具请求敏感，需用户审核，但审核提示发送失败，工具未执行。"
+            return None if await pending_approval else "该工具请求敏感，经用户审核，用户拒绝了本次工具请求。"
+        finally:
+            session.pending_approval = None
+
+
+async def audit_tool_request(
+    tool_name: str, tool_args: dict[str, Any], config: Config, context: ToolContext,
+    session: Session, inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
+) -> str | None:
+    """依次检查硬拒绝和审批规则，返回拦截反馈或允许执行的 None。"""
     if tool_name == "powershell":
-        denied = check_powershell_deny_command(str(tool_args.get("command", "")))
-        if denied is not None:
-            return ToolAuditResult(ToolDecision.DENY, denied)
-    reason = check_approval_required(tool_name, tool_args, config, context)
-    if reason is not None:
-        return ToolAuditResult(ToolDecision.REQUIRE_APPROVAL, reason)
-    return ToolAuditResult(ToolDecision.ALLOW, "")
+        feedback = check_powershell_deny_command(str(tool_args.get("command", "")))
+        if feedback is not None:
+            logger.warning("工具请求 %s（参数：%r）被安全检查拒绝：%s", tool_name, tool_args, feedback)
+            return feedback
+    feedback = check_approval_required(tool_name, tool_args, config, context)
+    if feedback is not None:
+        logger.warning("工具请求 %s（参数：%r）需要用户审批：%s", tool_name, tool_args, feedback)
+        return await request_tool_approval(tool_name, tool_args, session, inbound_message, message_dispatcher)
+    return None

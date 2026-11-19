@@ -1,8 +1,9 @@
-from asyncio import Future
+from asyncio import Future, Lock
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from aiorwlock import RWLock
 
 def get_owner_id(channel_id: str, reply_target: str) -> str:
     """将通道实例和回复目标编码为唯一来源标识，后续扩展只调整此函数。"""
@@ -24,6 +25,8 @@ class Session:
     owner_id: str = ""  # 当前占用来源的唯一标识，由 get_owner_id 统一生成。
     expires_at: float = 0.0  # 单调时间的过期时刻；当前轮执行期间为无限大。
     pending_approval: Future[bool] | None = None  # 等待用户审核敏感工具请求
+    tool_lock: RWLock = field(default_factory=RWLock)  # 同一会话内共享工具执行读写锁。
+    approval_lock: Lock = field(default_factory=Lock)  # 同一时间只向用户展示一个待审批请求。
 
     @property
     def id(self) -> str:

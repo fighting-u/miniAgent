@@ -5,6 +5,8 @@ description = "A minimal agent project for learning agent harness design."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # 为同一会话内的工具执行提供异步读写锁。
+    "aiorwlock>=1.4.0,<2",
     "httpx[socks]>=0.27.0",
     # MCP 客户端 SDK；使用兼容项目 Python 3.10 要求的 1.x 接口。
     "mcp>=1.26.0,<2",

@@ -1,20 +1,17 @@
 import asyncio
-import json
 import logging
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
 
 from openai import AsyncOpenAI
 
 from src.channels.base import InboundMessage, MessageDispatcher
+from src.common.common import persist_and_dispatch_items
 from src.config import Config
 from src.context_compact.context_compactor import ContextCompactor, is_context_length_error
 from src.hook.hook import trigger_hooks
 from src.memory.memory import extract_memories, load_memories
-from src.security.tool_guard import ToolDecision, audit_tool_request
-from src.session.session import Session
-from src.session.session_manager import SessionManager, serializable
+from src.session.session_manager import SessionManager
 from src.system_prompt import build_system_prompt
 from src.tools.local_tools import Plan
 from src.tools.tool import ToolContext
@@ -46,30 +43,6 @@ class TurnRunner:
         self.session_manager = session_manager
         self.message_dispatcher = message_dispatcher
         self.background_tasks = background_tasks
-
-    async def persist_and_dispatch_items(
-        self, inbound_message: InboundMessage, session: Session, items: list[Any], model_name: str | None = None
-    ) -> None:
-        """按原顺序落盘消息条目，再序列化并发送给来源通道。"""
-        for item in items:
-            self.session_manager.append(session, item, model_name=model_name)
-        await self.message_dispatcher.send(inbound_message, {"type": "items", "items": [serializable(item) for item in items]})
-
-    async def request_tool_approval(
-        self, inbound_message: InboundMessage, session: Session, tool_name: str, arguments: dict[str, Any], reason: str
-    ) -> str | None:
-        """等待用户审批，返回 None 表示通过，返回字符串作为工具结果。"""
-        pending_approval = asyncio.get_running_loop().create_future()
-        session.pending_approval = pending_approval
-        try:
-            sent = await self.message_dispatcher.send(
-                inbound_message, {"type": "request_approval", "text": f"模型请求调用工具 {tool_name} ，参数：{arguments}\n请输入 yes 或 no进行审核"}
-            )
-            if not sent:
-                return "审批提示发送失败，工具未执行。"
-            return None if await pending_approval else "该工具请求敏感，经用户审核，用户拒绝了本次工具请求。"
-        finally:
-            session.pending_approval = None
 
     # 核心
     async def run_turn(self, inbound_message: InboundMessage) -> None:
@@ -108,7 +81,9 @@ class TurnRunner:
                         continue
                     raise
                 # 按响应原始顺序落盘并分发推理、工具调用和回答，然后才执行工具。
-                await self.persist_and_dispatch_items(inbound_message, session, response.output, model_name=model_name)
+                await persist_and_dispatch_items(
+                    inbound_message, session, response.output, self.session_manager, self.message_dispatcher, model_name=model_name
+                )
                 messages.extend(response.output)
 
                 # 从模型本轮输出中筛选所有函数工具调用。
@@ -121,57 +96,15 @@ class TurnRunner:
                     if extra_input is not None:
                         # Harness 的续跑要求属于系统提示，不冒充真实用户输入。
                         extra_message = {"role": "system", "content": extra_input}
-                        await self.persist_and_dispatch_items(inbound_message, session, [extra_message])
+                        await persist_and_dispatch_items(inbound_message, session, [extra_message], self.session_manager, self.message_dispatcher)
                         messages.append(extra_message)
                         continue
                     break
 
-                # 依次分发模型请求的工具调用，并收集 OpenAI 格式的字符串结果。
-                results = []
-                for tool_call in tool_calls:
-                    try:
-                        # 这里是因为claude返回就是python字典，而openAI是json，要转换下
-                        arguments = json.loads(tool_call.arguments)
-                        if not isinstance(arguments, dict):
-                            raise TypeError("工具参数必须是 JSON 对象")
-                    except (json.JSONDecodeError, TypeError) as error:
-                        logger.warning("工具 %s 参数无效：%s", tool_call.name, error)
-                        tool_output = f"工具参数无效：{error}, 请检查工具调用格式"
-
-                    else:
-                        # 工具执行前触发 Hook
-                        trigger_hooks("PreToolUse", tool_call, arguments)
-                        # 统一审计工具请求，先检查高危规则，再检查是否需要审批。
-                        audit_result = audit_tool_request(tool_call.name, arguments, self.config, tool_context)
-                        if audit_result.decision == ToolDecision.DENY:
-                            tool_output = audit_result.feedback
-                            logger.warning("工具 %s 被安全检查拒绝：%s", tool_call.name, tool_output)
-                        else:
-                            approval_feedback = None
-                            if audit_result.decision == ToolDecision.REQUIRE_APPROVAL:
-                                logger.warning("工具 %s 需要用户审批：%s", tool_call.name, audit_result.feedback)
-                                approval_feedback = await self.request_tool_approval(
-                                    inbound_message, session, tool_call.name, arguments, audit_result.feedback
-                                )
-
-                            if approval_feedback is not None:
-                                tool_output = approval_feedback
-                            else:
-                                # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
-                                tool_output = str(await self.tool_manager.call(tool_call.name, arguments, tool_context))
-                                trigger_hooks("PostToolUse", tool_call, tool_output)
-
-                    result = {"type": "function_call_output", "call_id": tool_call.call_id, "output": tool_output}
-                    await self.persist_and_dispatch_items(inbound_message, session, [result])
-                    results.append(result)
-
-                # 整批工具结果之后追加 Hook 可能返回的系统消息。
-                extra_input = trigger_hooks("PostToolBatch", tool_context)
-                if extra_input:
-                    extra_message = {"role": "system", "content": extra_input}
-                    await self.persist_and_dispatch_items(inbound_message, session, [extra_message])
-                    results.append(extra_message)
-                messages.extend(results)
+                # 工具请求已随响应保存，批内结果由 ToolManager 按原顺序落盘并发送。
+                await self.tool_manager.execute_batch(
+                    tool_calls, tool_context, session, inbound_message, self.message_dispatcher, self.session_manager
+                )
         except BaseException:
             # 轮次中断后以内存外的原始记录重建历史，下轮再补齐缺失工具结果。
             self.session_manager.reload(session)

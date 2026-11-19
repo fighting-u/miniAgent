@@ -1,9 +1,18 @@
 import asyncio
+import json
 import logging
 from inspect import iscoroutinefunction
 from typing import Any, Callable
 
+from openai.types.responses import ResponseFunctionToolCall
+
+from src.channels.base import InboundMessage, MessageDispatcher
+from src.common.common import persist_and_dispatch_items
 from src.config import Config
+from src.hook.hook import trigger_hooks
+from src.security.tool_guard import audit_tool_request
+from src.session.session import Session
+from src.session.session_manager import SessionManager
 from src.tools.local_tools import register_local_tools
 from src.tools.mcp_manager import MCPManager
 from src.tools.tool import Tool, ToolContext
@@ -11,7 +20,6 @@ from src.tools.tool import Tool, ToolContext
 
 # 工具注册和调用的日志记录器。
 logger = logging.getLogger(__name__)
-
 
 class ToolManager:
     """管理本地和 MCP 工具的注册与生命周期，提供 schema 和调用入口。"""
@@ -60,18 +68,91 @@ class ToolManager:
                 arguments = {**arguments, "context": context}
             if is_async:
                 return await func(**arguments)
-            # 同步工具移到工作线程，保持常驻端监听可响应。
-            return await asyncio.to_thread(func, **arguments)
+            # 同步工具转异步，用新线程，避免阻塞监听等
+            worker = asyncio.create_task(asyncio.to_thread(func, **arguments))
+            try:
+                # 这里是为了以后增加取消/暂停执行的能力，shield保证外层协程被取消时不会直接取消本协程，而是先抛取消异常，等协程执行完
+                # 因为加了工具读写锁，避免暂停了，工具还没执行完，锁却释放了，恢复时被后面的工具占了，导致2个本该串行的写并发了
+                return await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # 已启动的线程无法取消，等它退出后再由调用方释放工具锁。
+                await asyncio.gather(worker, return_exceptions=True)
+                raise
 
         self.register(Tool(name, description, parameters, execute, strict, supports_parallel=supports_parallel))
 
-    async def call(self, name: str, arguments: dict[str, Any], context: ToolContext) -> Any:
-        """按名称执行工具，传入本轮状态并保留原始返回类型。"""
-        tool = self._tools.get(name)
+    async def execute(
+        self, call: ResponseFunctionToolCall, context: ToolContext, session: Session,
+        inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
+    ) -> str:
+        """解析并审核单个工具请求，按注册属性持锁执行，返回模型所需的字符串。"""
+        try:
+            # 这里是因为claude返回就是python字典，而openAI是json，要转换下
+            arguments = json.loads(call.arguments)
+            if not isinstance(arguments, dict):
+                raise TypeError("工具参数必须是 JSON 对象")
+        except (json.JSONDecodeError, TypeError) as error:
+            logger.warning("工具 %s 参数无效：%s", call.name, error)
+            return f"工具参数无效：{error}, 请检查工具调用格式"
+
+        # 工具执行前触发 Hook
+        trigger_hooks("PreToolUse", call, arguments)
+        # 统一审计工具请求，先检查高危规则，再检查是否需要审批。
+        feedback = await audit_tool_request(
+            call.name, arguments, self._config, context, session, inbound_message, message_dispatcher,
+        )
+        if feedback is not None:
+            return feedback
+
+        tool = self._tools.get(call.name)
         if tool is None:
-            logger.warning("调用了未注册的工具：%s", name)
-            return f"未知工具: {name}"
-        return await tool.execute(arguments, context)
+            logger.warning("调用了未注册的工具：%s", call.name)
+            return f"工具不存在: {call.name}，请检查工具名称"
+        # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
+        lock = session.tool_lock.reader_lock if tool.supports_parallel else session.tool_lock.writer_lock
+        async with lock:
+            output = str(await tool.execute(arguments, context))
+        trigger_hooks("PostToolUse", call, output)
+        return output
+
+    async def execute_batch(
+        self, calls: list[ResponseFunctionToolCall], context: ToolContext, session: Session,
+        inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
+        session_manager: SessionManager,
+    ) -> None:
+        """并发提交已落盘的调用，按模型调用顺序保存、发送结果并更新会话上下文。"""
+        tasks = [
+            asyncio.create_task(self.execute(call, context, session, inbound_message, message_dispatcher))
+            for call in calls
+        ]
+        try:
+            for call, task in zip(calls, tasks):
+                try:
+                    output = await task
+                except Exception as error:
+                    logger.exception("工具 %s 执行失败，call_id=%s", call.name, call.call_id)
+                    output = f"工具执行失败：{error}"
+                result = {"type": "function_call_output", "call_id": call.call_id, "output": output}
+                await persist_and_dispatch_items(
+                    inbound_message, session, [result], session_manager, message_dispatcher,
+                )
+                session.messages.append(result)
+        except BaseException:
+            # 批次中断时收回尚未完成的任务，再交给轮次恢复逻辑。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        # 整批工具结果之后追加 Hook 可能返回的系统消息。
+        extra_input = trigger_hooks("PostToolBatch", context)
+        if extra_input:
+            extra_message = {"role": "system", "content": extra_input}
+            await persist_and_dispatch_items(
+                inbound_message, session, [extra_message], session_manager, message_dispatcher,
+            )
+            session.messages.append(extra_message)
 
     def get_schemas(self) -> list[dict[str, Any]]:
         """从已注册工具生成 OpenAI Responses 的 function 工具定义。"""

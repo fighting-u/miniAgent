@@ -201,6 +201,35 @@ wheels = [
 ]
 
 [[package]]
+name = "aiorwlock"
+version = "1.5.1"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/65/316cdc82c1b92953235ced1c71a3763f0cd9273c3bec5db60bdb5ad59bfe/aiorwlock-1.5.1.tar.gz", hash = "sha256:2729c77ec736c8d85ec305aa3827a50394fd8c6d823f4404d301cc8c59a4b7f5", size = 7288, upload-time = "2026-02-20T17:42:17.164Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/23/dc60c00fb9178e356d7f5fb009aabae4625ce79c3e63ed4ef3bcc73d949c/aiorwlock-1.5.1-py3-none-any.whl", hash = "sha256:a28e534a5fce4dabe437055db141369a0803c69fe61c406b6fc5cdfa8f3dda13", size = 8016, upload-time = "2026-02-20T17:42:18.095Z" },
+]
+
+[[package]]
+name = "aiorwlock"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "python_full_version >= '3.14' and sys_platform == 'win32'",
+    "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32'",
+    "(python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32') or (python_full_version == '3.11.*' and sys_platform == 'emscripten')",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5f/ee/1967e9d2bbfc7be9fedf7607027c8f05bc7e088b7d455552e42369e9f831/aiorwlock-1.6.0.tar.gz", hash = "sha256:267c168e8e2804f17f3137a217015885e049f464afbedea7008a5c2fa1e2195b", size = 7349, upload-time = "2026-11-17T11:51:58.331Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/59/5f/6ad0805349fb079e8b96fafdd7d29395bd2527083c7b82a88e0a1a44c878/aiorwlock-1.6.0-py3-none-any.whl", hash = "sha256:a226bc4c02034aa305e5149f27a7ee6c3e2281bfa3233cabeab29e6e75ed8e26", size = 7972, upload-time = "2026-11-17T11:51:59.122Z" },
+]
+
+[[package]]
 name = "aiosignal"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -934,6 +963,8 @@ name = "mini-agent"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiorwlock", version = "1.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "aiorwlock", version = "1.6.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "httpx", extra = ["socks"] },
     { name = "mcp" },
     { name = "openai" },
@@ -947,6 +978,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiorwlock", specifier = ">=1.4.0,<2" },
     { name = "httpx", extras = ["socks"], specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.26.0,<2" },
     { name = "openai", specifier = ">=1.66.0" },
