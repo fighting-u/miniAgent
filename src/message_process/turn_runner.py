@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from src.channels.base import InboundMessage, MessageDispatcher
 from src.config import Config
 from src.context_compact.context_compactor import ContextCompactor, is_context_length_error
-from src.hook.hook import check_deny_list, check_rules, trigger_hooks
+from src.hook.hook import check_approval_required, check_powershell_deny_command, trigger_hooks
 from src.hook.permissions import ApprovalBroker
 from src.memory.memory import extract_memories, load_memories
 from src.session.session import Session
@@ -68,7 +68,8 @@ class TurnRunner:
             messages = session.messages
             current_request = inbound_message.input
             # 每次调用对应一个用户 turn，计划仅在本轮工具循环内共用，不跨 turn 保留。
-            tool_context = ToolContext(plan=Plan())
+            # 当前通道未提供工作目录，在 turn 入口使用配置中的目录。
+            tool_context = ToolContext(plan=Plan(), current_working_directory=self.config.workdir)
             # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
             relevant_memories = await load_memories(self.client, messages, self.config)
             instructions = build_system_prompt(self.config, relevant_memories)
@@ -130,8 +131,8 @@ class TurnRunner:
                         # 工具执行前触发 Hook，返回非 None 值时跳过本次工具调用。
                         blocked = trigger_hooks("PreToolUse", tool_call, arguments)
                         # 闸门 1：高危规则直接拒绝；闸门 2 和 3：敏感操作由来源客户端审批。
-                        denied = check_deny_list(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
-                        reason = check_rules(tool_call.name, arguments, self.config) if denied is None else None
+                        denied = check_powershell_deny_command(str(arguments.get("command", ""))) if tool_call.name == "powershell" else None
+                        reason = check_approval_required(tool_call.name, arguments, self.config) if denied is None else None
                         if blocked is None:
                             if reason:
                                 permission = {

@@ -3,7 +3,6 @@ import re
 from typing import Any, Callable
 
 from src.config import Config
-from src.tools.local_tools import is_allowed_path
 from src.tools.tool import ToolContext
 
 
@@ -64,14 +63,18 @@ def contains_destructive_command(command: str) -> bool:
     return bool(DESTRUCTIVE_COMMAND_WORD.search(command))
 
 
+def is_outside_allowed_dirs(args: dict[str, Any], config: Config) -> bool:
+    """判断文件工具的目标路径是否在所有允许目录之外。"""
+    path = (config.workdir / str(args.get("path", ""))).resolve()
+    return not any(path.is_relative_to(root) for root in (config.workdir, *config.extra_allowed_dirs))
+
+
 # 第二重闸门的敏感操作规则，命中后需要进入用户审批流程。
 PERMISSION_RULES = [
     {
         "tools": ["read_file", "write_file", "edit_file"],
-        "check": lambda args, config: not is_allowed_path(
-            (config.workdir / str(args.get("path", ""))).resolve(), config.workdir, config.extra_allowed_dirs,
-        ),
-        "message": "访问允许的目录之外的文件",
+        "check": is_outside_allowed_dirs,
+        "message": "访问允许的目录之外的文件夹或文件",
     },
     {
         "tools": ["powershell"],
@@ -85,7 +88,7 @@ PERMISSION_RULES = [
 ]
 
 
-def check_deny_list(command: str) -> str | None:
+def check_powershell_deny_command(command: str) -> str | None:
     """忽略大小写检查命令是否包含某条硬拒绝规则的全部关键词。"""
     normalized_command = command.casefold()
     for keywords in DENY_LIST:
@@ -94,7 +97,7 @@ def check_deny_list(command: str) -> str | None:
     return None
 
 
-def check_rules(tool_name: str, tool_input: dict[str, Any], config: Config) -> str | None:
+def check_approval_required(tool_name: str, tool_input: dict[str, Any], config: Config) -> str | None:
     """按照权限规则检查工具调用是否需要用户审批。"""
     for rule in PERMISSION_RULES:
         if tool_name in rule["tools"] and rule["check"](tool_input, config):

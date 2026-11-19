@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_path(path: str, context: ToolContext) -> Path:
+    """以本轮工作目录为基准解析路径。"""
+    # 这里的 / 是 pathlib.Path 重载的路径拼接运算符，不是简单的字符串拼接。
+    # 当右侧是完整的绝对路径时，会直接采用右侧路径，舍弃左侧的工作区。
+    return (context.current_working_directory / path).resolve()
+
+
 def run_get_model_name(*, model_name: str) -> str:
     """读取与当前模型请求相同的统一配置，返回配置的模型名称。"""
     return model_name
@@ -30,13 +37,10 @@ def run_get_current_time() -> str:
 
 
 # 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
-def run_powershell(
-    command: str, workdir: str | None = None, *,
-    default_cwd: Path, extra_allowed_dirs: tuple[Path, ...], timeout: int,
-) -> str:
-    """在指定目录或默认工作区执行 PowerShell 命令，并以字符串返回结果。"""
+def run_powershell(command: str, workdir: str | None = None, *, timeout: int, context: ToolContext) -> str:
+    """在本次调用的工作目录执行 PowerShell，并以字符串返回结果。"""
     try:
-        cwd = resolve_tool_workdir(workdir, default_cwd, extra_allowed_dirs)
+        cwd = resolve_path(workdir if workdir is not None else ".", context)
         completed = subprocess.run(
             [
                 "powershell.exe",
@@ -65,37 +69,10 @@ def run_powershell(
         return f"无法启动 PowerShell：{error}"
 
 
-def is_allowed_path(path: Path, workdir: Path, extra_allowed_dirs: tuple[Path, ...]) -> bool:
-    """检查解析后的路径是否属于当前工作区或额外允许目录。"""
-    return any(path.is_relative_to(root) for root in (workdir, *extra_allowed_dirs))
-
-
-def safe_path(path: str, workdir: Path, extra_allowed_dirs: tuple[Path, ...]) -> Path:
-    """将相对路径解析到工作区，阻止访问所有允许目录之外的路径。"""
-    # 这里的 / 是 pathlib.Path 重载的路径拼接运算符，不是简单的字符串拼接。
-    # 当右侧是完整的绝对路径时，会直接采用右侧路径，舍弃左侧的工作区。
-    resolved_path = (workdir / path).resolve()
-    if not is_allowed_path(resolved_path, workdir, extra_allowed_dirs):
-        logger.warning("文件路径不在允许范围内，拒绝访问：%s", resolved_path)
-        raise ValueError(f"路径不在允许的工作区或额外目录内：{path}")
-    return resolved_path
-
-
-def resolve_tool_workdir(
-    workdir: str | None, default_cwd: Path, extra_allowed_dirs: tuple[Path, ...],
-) -> Path:
-    """省略时使用默认工作区，相对路径以工作区为基准，绝对路径直接校验。"""
-    cwd = default_cwd if workdir is None else safe_path(workdir, default_cwd, extra_allowed_dirs)
-    if not cwd.is_dir():
-        logger.warning("工具工作目录不存在或不是目录：%s", cwd)
-        raise ValueError(f"工作目录不存在或不是目录：{cwd}")
-    return cwd
-
-
-def run_read(path: str, limit: int | None = None, *, workdir: Path, extra_allowed_dirs: tuple[Path, ...]) -> str:
-    """读取工作区内的 UTF-8 文本文件，可选择限制返回的行数。"""
+def run_read(path: str, limit: int | None = None, *, context: ToolContext) -> str:
+    """读取指定的 UTF-8 文本文件，可选择限制返回的行数。"""
     try:
-        lines = safe_path(path, workdir, extra_allowed_dirs).read_text(encoding="utf-8").splitlines()
+        lines = resolve_path(path, context).read_text(encoding="utf-8").splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
         return "\n".join(lines)
@@ -103,45 +80,43 @@ def run_read(path: str, limit: int | None = None, *, workdir: Path, extra_allowe
         return f"Error: {error}"
 
 
-def run_write(path: str, content: str, *, workdir: Path, extra_allowed_dirs: tuple[Path, ...]) -> str:
-    """向工作区内的 UTF-8 文本文件写入内容，并按需创建父目录。"""
+def run_write(path: str, content: str, *, context: ToolContext) -> str:
+    """向指定的 UTF-8 文本文件写入内容，并按需创建父目录。"""
     try:
-        file_path = safe_path(path, workdir, extra_allowed_dirs)
+        file_path = resolve_path(path, context)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} bytes to {path}"
+        return f"Wrote {len(content)} bytes to {file_path}"
     except Exception as error:
         return f"Error: {error}"
 
 
-def run_edit(path: str, old_text: str, new_text: str, *, workdir: Path, extra_allowed_dirs: tuple[Path, ...]) -> str:
-    """在工作区内的 UTF-8 文本文件中替换第一次出现的指定文本。"""
+def run_edit(path: str, old_text: str, new_text: str, *, context: ToolContext) -> str:
+    """在指定的 UTF-8 文本文件中替换第一次出现的指定文本。"""
     try:
-        file_path = safe_path(path, workdir, extra_allowed_dirs)
+        file_path = resolve_path(path, context)
         text = file_path.read_text(encoding="utf-8")
         if old_text not in text:
-            return f"Error: text not found in {path}"
+            return f"Error: text not found in {file_path}"
         file_path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-        return f"Edited {path}"
+        return f"Edited {file_path}"
     except Exception as error:
         return f"Error: {error}"
 
 
-def run_glob(
-    pattern: str, workdir: str | None = None, *,
-    default_cwd: Path, extra_allowed_dirs: tuple[Path, ...],
-) -> str:
+def run_glob(pattern: str, workdir: str | None = None, *, context: ToolContext) -> str:
     """从指定目录或默认工作区查找 glob 匹配项，最多返回 200 项。"""
     import glob as glob_module
 
     try:
-        cwd = resolve_tool_workdir(workdir, default_cwd, extra_allowed_dirs)
+        cwd = resolve_path(workdir if workdir is not None else ".", context)
+        if not cwd.is_dir():
+            logger.warning("glob 工作目录不存在或不是目录：%s", cwd)
+            return f"错误：工作目录不存在或不是目录：{cwd}"
         matches: set[str] = set()
         for match in glob_module.glob(pattern, root_dir=cwd, recursive=True):
-            path = (cwd / match).resolve()
-            if is_allowed_path(path, default_cwd, extra_allowed_dirs):
-                # 显式指定搜索目录时返回绝对路径，供读写工具直接使用。
-                matches.add(str(path) if workdir is not None else match)
+            # 返回绝对路径，供读写工具直接使用。
+            matches.add(str((cwd / match).resolve()))
         shown = sorted(matches)[:200]
         if len(matches) > 200:
             shown.append("... (more matches omitted; narrow the pattern)")
@@ -253,15 +228,10 @@ def run_load_skill(name: str) -> str:
 
 def register_local_tools(registry: "ToolManager", config: Config) -> None:
     """集中注册本地工具，并绑定各工具需要的运行时配置。"""
-    workdir = config.workdir
-    extra_allowed_dirs = config.extra_allowed_dirs
     # 提供给模型的工具定义；parameters 使用 JSON Schema 描述模型可传入的参数。
     registry.register_local_tool(
         name="powershell",
-        func=partial(
-            run_powershell, default_cwd=workdir, extra_allowed_dirs=extra_allowed_dirs,
-            timeout=config.powershell_timeout,
-        ),
+        func=partial(run_powershell, timeout=config.powershell_timeout),
         description="执行 PowerShell 命令。",
         parameters={
             "type": "object",
@@ -273,11 +243,12 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "additionalProperties": False,
         },
         strict=False,
+        uses_context=True,
     )
 
     registry.register_local_tool(
         name="read_file",
-        func=partial(run_read, workdir=workdir, extra_allowed_dirs=extra_allowed_dirs),
+        func=run_read,
         description="Read file contents.",
         parameters={
             "type": "object",
@@ -285,11 +256,12 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "required": ["path"],
             "additionalProperties": False,
         },
+        uses_context=True,
     )
 
     registry.register_local_tool(
         name="write_file",
-        func=partial(run_write, workdir=workdir, extra_allowed_dirs=extra_allowed_dirs),
+        func=run_write,
         description="Write content to a file.",
         parameters={
             "type": "object",
@@ -297,11 +269,12 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "required": ["path", "content"],
             "additionalProperties": False,
         },
+        uses_context=True,
     )
 
     registry.register_local_tool(
         name="edit_file",
-        func=partial(run_edit, workdir=workdir, extra_allowed_dirs=extra_allowed_dirs),
+        func=run_edit,
         description="Replace exact text in a file once.",
         parameters={
             "type": "object",
@@ -309,11 +282,12 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "required": ["path", "old_text", "new_text"],
             "additionalProperties": False,
         },
+        uses_context=True,
     )
 
     registry.register_local_tool(
         name="glob",
-        func=partial(run_glob, default_cwd=workdir, extra_allowed_dirs=extra_allowed_dirs),
+        func=run_glob,
         description="查找与 glob 模式匹配的文件或目录，支持 ** 递归匹配。",
         parameters={
             "type": "object",
@@ -325,6 +299,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "additionalProperties": False,
         },
         strict=False,
+        uses_context=True,
     )
 
     registry.register_local_tool(

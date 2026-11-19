@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
@@ -10,6 +11,7 @@ class ToolContext:
     """保存工具调用所需的本轮状态，由 Agent 为每个 turn 单独创建。"""
 
     plan: "Plan"  # 当前 turn 的任务计划。
+    current_working_directory: Path  # 当前 turn 用于解析相对路径和补全工具工作目录的基准目录。
 
 
 @dataclass
