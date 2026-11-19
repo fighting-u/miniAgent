@@ -45,6 +45,7 @@ class ToolManager:
     def register_local_tool(
         self, *, name: str, func: Callable[..., Any], description: str,
         parameters: dict[str, Any], strict: bool | None = None, uses_context: bool = False,
+        supports_parallel: bool = False,
     ) -> None:
         """使用显式 schema 注册本地函数，按需传入本轮状态。"""
         is_async = iscoroutinefunction(func)
@@ -62,7 +63,7 @@ class ToolManager:
             # 同步工具移到工作线程，保持常驻端监听可响应。
             return await asyncio.to_thread(func, **arguments)
 
-        self.register(Tool(name, description, parameters, execute, strict))
+        self.register(Tool(name, description, parameters, execute, strict, supports_parallel=supports_parallel))
 
     async def call(self, name: str, arguments: dict[str, Any], context: ToolContext) -> Any:
         """按名称执行工具，传入本轮状态并保留原始返回类型。"""

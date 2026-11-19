@@ -154,6 +154,7 @@ class MCPManager:
                     parameters=tool.inputSchema,
                     execute=partial(self._call_tool, session, tool.name),
                     strict=False,
+                    supports_parallel=tool.annotations is not None and tool.annotations.readOnlyHint is True,
                 )
             cursor = page.nextCursor
             if cursor is None:

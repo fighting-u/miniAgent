@@ -248,6 +248,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="read_file",
+        supports_parallel=True,
         func=run_read,
         description="Read file contents.",
         parameters={
@@ -287,6 +288,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="glob",
+        supports_parallel=True,
         func=run_glob,
         description="查找与 glob 模式匹配的文件或目录，支持 ** 递归匹配。",
         parameters={
@@ -332,6 +334,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="load_skill",
+        supports_parallel=True,
         func=run_load_skill,
         description="按名称读取某项技能的完整说明。仅在技能适用于当前任务时调用。",
         parameters={
@@ -345,6 +348,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="load_memory",
+        supports_parallel=True,
         func=load_memory,
         description="根据系统提示词中的记忆文件名，按需读取一条长期记忆的完整内容。",
         parameters={
@@ -358,6 +362,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="get_model_name",
+        supports_parallel=True,
         func=partial(run_get_model_name, model_name=config.model),
         description="获取当前请求配置的模型名称，读取统一运行配置。",
         parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
@@ -366,6 +371,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
 
     registry.register_local_tool(
         name="get_current_time",
+        supports_parallel=True,
         func=run_get_current_time,
         description="获取系统本地当前时间，以带时区偏移的 ISO 8601 格式返回，精确到秒，例如 2026-11-11T15:30:45+08:00。",
         parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},

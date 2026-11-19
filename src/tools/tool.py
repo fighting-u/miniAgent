@@ -23,3 +23,4 @@ class Tool:
     parameters: dict[str, Any]  # 工具参数的 JSON Schema。
     execute: Callable[[dict[str, Any], ToolContext], Awaitable[Any]]  # 接收模型参数和本轮状态的异步执行入口。
     strict: bool | None = None  # None 表示不向模型请求显式传入 strict。
+    supports_parallel: bool = False  # 是否支持与其他允许并发的工具同时执行。
