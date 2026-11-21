@@ -277,8 +277,10 @@ class QQChannel(Channel):
             await self._send_text(reply, f"{event['title']}：{event['session_id']}")
         elif event_type == "sessions":
             entries = event["sessions"]
-            text = "\n".join(f"{entry['id']}  {entry['preview']}" for entry in entries) or "暂无历史会话。"
-            await self._send_text(reply, text + "\n恢复会话：/resume <会话ID>")
+            lines = [f"{number}. {entry['preview']}" for number, entry in enumerate(entries, start=1)]
+            if lines:
+                lines.append("回复 /resume 编号 恢复会话，例如：/resume 1")
+            await self._send_text(reply, "\n".join(lines) or "暂无历史会话。")
         elif event_type in {"status", "error", "request_approval"}:
             await self._send_text(reply, event["text"])
         elif event_type == "done":

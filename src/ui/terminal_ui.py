@@ -78,8 +78,7 @@ class SessionCompleter(Completer):
         for index, session in enumerate(self.sessions, start=1):
             number = str(index)
             if number.startswith(prefix):
-                timestamp = datetime.fromtimestamp(session["updated_at"]).strftime("%Y-%m-%d %H:%M")
-                display = f"{index:>2}  {timestamp}  {session['preview']}"
+                display = f"{number}. {session['preview']}"
                 yield Completion(number, start_position=-len(prefix), display=display)
 
 
@@ -136,7 +135,7 @@ class TerminalUI:
             message=f"{action} › ", completer=SessionCompleter(sessions), complete_while_typing=True,
             key_bindings=menu_bindings(), style=UI_STYLE, reserve_space_for_menu=10,
             placeholder="选择会话或输入序号；Ctrl+C 取消",
-            bottom_toolbar="最近时间 · 首条用户问题    ↑↓ 选择  Tab 补全  Enter 确认",
+            bottom_toolbar="编号 · 首条用户问题    ↑↓ 选择  Tab 补全  Enter 确认",
         )
 
         def show_choices() -> None:

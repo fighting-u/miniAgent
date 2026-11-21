@@ -35,6 +35,7 @@ class MessageProcessor:
         self.session_manager = session_manager
         self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests = requests
+        self.session_choices: dict[str, list[str]] = {}  # 各入口最近展示的编号顺序，不随会话更新时间改变。
         self.turn_runner = TurnRunner(
             client=client,
             config=config,
@@ -78,7 +79,10 @@ class MessageProcessor:
 
     async def _list_sessions(self, message: InboundMessage) -> None:
         """发送会话列表，不创建会话或改变入口选择。"""
-        await self.message_dispatcher.send(message, {"type": "sessions", "sessions": self.session_manager.list_sessions()})
+        entries = self.session_manager.list_sessions()
+        if await self.message_dispatcher.send(message, {"type": "sessions", "sessions": entries}):
+            owner_id = get_owner_id(message.channel_id, message.reply_target)
+            self.session_choices[owner_id] = [entry["id"] for entry in entries]
 
     async def _command(self, message: InboundMessage) -> None:
         """识别斜杠命令；菜单在客户端展示，文件操作由常驻端执行。"""
@@ -89,7 +93,13 @@ class MessageProcessor:
         elif command in {"/resume", "/delete"} and not argument:
             await self._list_sessions(message)
         elif command == "/resume":
-            await self._select_session(message, argument, "已恢复会话")
+            number = int(argument)
+            choices = self.session_choices.get(get_owner_id(message.channel_id, message.reply_target), [])
+            if not choices:
+                raise ValueError("请先发送 /resume 查看历史会话列表。")
+            if not 1 <= number <= len(choices):
+                raise ValueError(f"会话编号超出范围，请输入 1 到 {len(choices)} 之间的编号。")
+            await self._select_session(message, choices[number - 1], "已恢复会话")
         elif command == "/delete":
             session_id, _, confirmation = argument.partition(" ")
             if confirmation != "confirm":
