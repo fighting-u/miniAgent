@@ -14,14 +14,44 @@ from src.channels.base import Channel, InboundMessage, Submit, input_type
 logger = logging.getLogger(__name__)
 
 
+# QQ 工具参数和结果各自最多展示的字符数，省略号另计。
+PREVIEW_CHARS = 20
+
+
+def _preview(text: str) -> str:
+    """把多行内容转为单行预览，超长时追加三个英文句点。"""
+    text = " ".join(text.splitlines())
+    return text[:PREVIEW_CHARS] + "..." if len(text) > PREVIEW_CHARS else text
+
+
+def _argument_preview(arguments: str) -> str:
+    """紧凑展示模型参数，参数格式错误时展示原文以便与错误结果对照。"""
+    try:
+        arguments = json.dumps(json.loads(arguments), ensure_ascii=False, separators=(",", ":"))
+    except json.JSONDecodeError:
+        pass  # 工具执行层已记录参数错误。
+    return _preview(arguments)
+
+
+@dataclass
+class QQToolCall:
+    """保存一条待汇总的工具调用，仅保留展示所需的短文本。"""
+
+    call_id: str | None
+    name: str
+    arguments: str
+    result: str | None = None  # None 表示仍在等待函数工具结果。
+
+
 @dataclass
 class QQReply:
-    """保留原始消息的被动回复凭据和本轮最终回答。"""
+    """保留原始消息的回复凭据、当前工具批次和本轮最终回答。"""
 
     target: str  # QQ 用户 openid，作为稳定的 reply_target。
     msg_id: str  # 用户原始消息 ID，发送被动回复时必须携带。
     seq: int = 0  # 同一原始消息的回复序号，避免重复 msg_id + msg_seq。
     texts: list[str] = field(default_factory=list)  # 暂存本轮助手文本，done 时合并发送。
+    calls: list[QQToolCall] = field(default_factory=list)  # 按模型响应中的声明顺序保存当前批次。
 
 
 class QQChannel(Channel):
@@ -198,8 +228,21 @@ class QQChannel(Channel):
         if result is None:
             raise RuntimeError("QQ 消息发送未返回结果，可能请求超时")
 
+    async def _send_tool_summary(self, reply: QQReply) -> None:
+        """整批结果到齐后清空缓存并主动发送，保留被动回复次数给审批和回答。"""
+        if not reply.calls or any(call.result is None for call in reply.calls):
+            return
+        text = "\n".join(
+            f"请求调用 {call.name}，args={call.arguments}，返回结果预览：{call.result}"
+            for call in reply.calls
+        )
+        reply.calls.clear()  # 发送失败或取消也不会将上一批带入下一次模型响应。
+        result = await self.api.post_c2c_message(openid=reply.target, msg_type=0, content=text)
+        if result is None:
+            raise RuntimeError("QQ 工具摘要发送未返回结果，可能请求超时")
+
     async def send(self, reply_target: str, event: dict[str, Any]) -> None:
-        """把 Runtime 事件转为私聊文本，工具过程不推送，助手回答在 done 时发送。"""
+        """把 Runtime 事件转为私聊文本，工具按批发送，助手回答在 done 时发送。"""
         reply = self.replies[event["request_id"]]
         if reply.target != reply_target:
             raise ValueError("QQ 回复目标与原始消息不匹配")
@@ -214,6 +257,21 @@ class QQChannel(Channel):
                         text = part.get("text") if part.get("type") == "output_text" else part.get("refusal")
                         if text:
                             reply.texts.append(text)
+                elif item.get("type") == "function_call":
+                    reply.calls.append(QQToolCall(item["call_id"], item["name"], _argument_preview(item["arguments"])))
+                elif item.get("type") == "function_call_output":
+                    for call in reply.calls:
+                        if call.call_id == item["call_id"]:
+                            call.result = _preview(item["output"])
+                            break
+                    else:
+                        logger.warning("QQ 工具结果缺少对应请求：request=%s call_id=%s", event["request_id"], item["call_id"])
+                elif item.get("type") == "web_search_call":
+                    # 托管搜索随模型响应完成，只有状态时直接展示该状态。
+                    action = json.dumps(item.get("action", {}), ensure_ascii=False, separators=(",", ":"))
+                    status = f"状态 {item['status']}" if item.get("status") else "未提供结果详情"
+                    reply.calls.append(QQToolCall(None, "web_search", _preview(action), _preview(status)))
+            await self._send_tool_summary(reply)
         elif event_type == "session":
             self.session_id = event["session_id"]
             await self._send_text(reply, f"{event['title']}：{event['session_id']}")
