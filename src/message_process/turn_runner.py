@@ -70,7 +70,10 @@ class TurnRunner:
                 # messages[:] = await compactor.prepare(messages, current_request)
                 # 发送当前对话，请求模型继续推理或调用工具。
                 try:
-                    response = await self.client.responses.create(model=model_name, instructions=instructions, input=messages, tools=available_tools)
+                    response = await self.client.responses.create(
+                        model=model_name, instructions=instructions, input=messages,
+                        tools=available_tools, parallel_tool_calls=True,
+                    )
                     # print(response.output)
                     reactive_retries = 0
                 except Exception as error:

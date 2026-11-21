@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 # 当前持久化记录对应的 LLM API 协议格式。
 API_FORMAT = "openai_responses"
 
-# 本阶段支持的 Responses 上下文项类型，未知类型明确报错。
-MESSAGE_TYPES = {"message", "reasoning", "function_call", "function_call_output", "web_search_call"}
+# 基本 Responses 上下文项类型；会话管理器按配置补充托管工具调用类型，未知类型明确报错。
+BASE_MESSAGE_TYPES = frozenset({"message", "reasoning", "function_call", "function_call_output"})
 
 
 def omit_none(value: Any) -> Any:
@@ -76,7 +76,7 @@ def delete(path: str | Path, root: Path) -> None:
     target.unlink()
 
 
-def load(path: str | Path) -> Session:
+def load(path: str | Path, *, message_types: frozenset[str] = BASE_MESSAGE_TYPES) -> Session:
     """校验文件并恢复原始上下文，移除附加 metadata，不改写历史。"""
     session = Session(Path(path).resolve())
     with session.path.open("r", encoding="utf-8") as source:
@@ -93,7 +93,7 @@ def load(path: str | Path) -> Session:
                 if turn_id not in {session.turn_id, session.turn_id + 1}:
                     raise ValueError("turn_id 必须从 0 开始，保持不变或递增 1")
                 payload = record.get("payload")
-                if not isinstance(payload, dict) or payload.get("type") not in MESSAGE_TYPES:
+                if not isinstance(payload, dict) or payload.get("type") not in message_types:
                     raise ValueError("不支持的 payload 类型")
                 message = dict(payload)
                 metadata = message.pop("metadata", {})
@@ -133,7 +133,10 @@ def _track_call(session: Session, message: dict[str, Any]) -> None:
         del session.pending_calls[message["call_id"]]
 
 
-def append(session: Session, item: Any, model_name: str | None = None, *, is_error: bool | None = None) -> None:
+def append(
+    session: Session, item: Any, model_name: str | None = None, *,
+    is_error: bool | None = None, message_types: frozenset[str] = BASE_MESSAGE_TYPES,
+) -> None:
     """按 API 原字段追加一条记录，仅模型消息与推理附带模型名称。"""
     if session.turn_id < 0:
         raise ValueError("请先通过 start_turn 开始用户请求")
@@ -145,7 +148,7 @@ def append(session: Session, item: Any, model_name: str | None = None, *, is_err
         raise TypeError("会话项必须为字典或 SDK 响应对象")
     if "type" not in payload and "role" in payload:
         payload["type"] = "message"
-    if payload.get("type") not in MESSAGE_TYPES:
+    if payload.get("type") not in message_types:
         raise ValueError(f"不支持的会话项类型：{payload.get('type')}")
     _validate_call(session, payload)
     metadata: dict[str, Any] = {"api_format": API_FORMAT}

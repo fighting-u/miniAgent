@@ -26,6 +26,8 @@ class SessionManager:
     def __init__(self, root: Path, config: Config) -> None:
         """接收会话目录和配置，保存占用保留秒数，一次读取绑定，历史按需加载。"""
         self.root = root  # 会话 JSONL 和 bindings 文件所在目录。
+        # 写入和恢复都接受基础消息，以及配置中各托管工具对应的调用记录。
+        self.message_types = storage.BASE_MESSAGE_TYPES.union(f"{name}_call" for name in config.model_hosted_tools)
         self.session_owner_ttl = config.session_owner_ttl  # 当前轮结束后，原来源继续占用的秒数。
         self.sessions: dict[str, Session] = {}  # 已加载或尚未落盘的会话状态。
         self.bindings_path = root / "bindings"  # 稳定通道实例 ID 到会话 ID 的 JSON 映射。
@@ -46,7 +48,7 @@ class SessionManager:
         entry = next((entry for entry in storage.list_sessions(self.root) if entry["path"].stem == session_id), None)
         if entry is None:
             return None
-        session = storage.load(entry["path"])
+        session = storage.load(entry["path"], message_types=self.message_types)
         self.sessions[session.id] = session
         logger.info("已加载会话：%s", session.id)
         return session
@@ -119,11 +121,11 @@ class SessionManager:
 
     def append(self, session: Session, item: Any, model_name: str | None = None, *, is_error: bool | None = None) -> None:
         """由调用方取得会话占用，委托 storage 保存原始模型或工具消息。"""
-        storage.append(session, item, model_name=model_name, is_error=is_error)
+        storage.append(session, item, model_name=model_name, is_error=is_error, message_types=self.message_types)
 
     def reload(self, session: Session) -> None:
         """执行中断后从已落盘记录重建同一会话的状态，保留来源占用信息。"""
-        loaded = storage.load(session.path)
+        loaded = storage.load(session.path, message_types=self.message_types)
         session.messages = loaded.messages
         session.ordinal = loaded.ordinal
         session.turn_id = loaded.turn_id

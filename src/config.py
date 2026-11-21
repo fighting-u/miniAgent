@@ -55,10 +55,6 @@ class Config:
             raise ValueError("base_url 必须是文本或 null")
         if not isinstance(config.channels, list) or not isinstance(config.mcp_servers, dict):
             raise ValueError("channels 必须是列表，mcp_servers 必须是对象")
-        if not isinstance(config.model_hosted_tools, list) or any(
-            tool_type != "web_search" for tool_type in config.model_hosted_tools
-        ):
-            raise ValueError("model_hosted_tools 必须是列表，目前仅支持 web_search")
         seen = set()
         for item in config.channels:
             if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
