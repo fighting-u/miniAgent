@@ -56,6 +56,13 @@ PERMISSION_RULES = [
         "message": "访问允许的目录之外的文件夹或文件",
     },
     {
+        "tools": ["read_images"],
+        "check": lambda args, config, context: any(
+            is_outside_allowed_dirs(path, config, context) for path in args["paths"]
+        ),
+        "message": "图片路径列表包含允许目录之外的文件",
+    },
+    {
         "tools": ["powershell", "glob"],
         "check": lambda args, config, context: is_outside_allowed_dirs(args.get("workdir"), config, context),
         "message": "工作目录在允许范围之外",

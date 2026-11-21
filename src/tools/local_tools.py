@@ -1,4 +1,5 @@
 import ast
+import base64
 import json
 import logging
 from datetime import datetime
@@ -10,7 +11,7 @@ from functools import partial
 from src.config import Config, PROJECT_ROOT
 from src.memory.memory import load_memory
 from src.tools.skill import SKILLS_DIR_NAME, SkillLoader
-from src.tools.tool import ToolContext, ToolResult, text_result
+from src.tools.tool import ImageContent, TextContent, ToolContext, ToolResult, text_result
 
 if TYPE_CHECKING:
     from src.tools.tool_manager import ToolManager
@@ -83,6 +84,43 @@ def run_read(path: str, limit: int | None = None, *, context: ToolContext) -> To
         return text_result("\n".join(lines))
     except Exception as error:
         return text_result(str(error), is_error=True)
+
+
+def image_mime_type(data: bytes) -> str:
+    """根据文件头识别支持的图片格式。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    raise ValueError("无法识别图片格式，仅支持 PNG、JPEG、GIF 和 WebP")
+
+
+def run_read_images(paths: list[str], *, context: ToolContext) -> ToolResult:
+    """按传入顺序返回路径和图片，单张读取失败不影响其他图片。"""
+    if not paths:
+        logger.warning("批量读取图片时未提供路径")
+        return text_result("图片路径列表不能为空", is_error=True)
+    blocks: list[TextContent | ImageContent] = []
+    errors: list[str] = []
+    for path in paths:
+        try:
+            data = resolve_path(path, context).read_bytes()
+            mime_type = image_mime_type(data)
+        except (OSError, ValueError) as error:
+            message = f"读取图片失败：{path}：{error}"
+            logger.warning(message)
+            errors.append(message)
+            blocks.append(TextContent(message))
+            continue
+        blocks.append(TextContent(f"图片：{path}"))
+        blocks.append(ImageContent(mime_type, base64.b64encode(data).decode("ascii")))
+    if len(errors) == len(paths):
+        return text_result("\n".join(errors), is_error=True)
+    return ToolResult(blocks)
 
 
 def run_write(path: str, content: str, *, context: ToolContext) -> ToolResult:
@@ -260,6 +298,20 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
             "type": "object",
             "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
             "required": ["path"],
+            "additionalProperties": False,
+        },
+        uses_context=True,
+    )
+
+    registry.register_local_tool(
+        name="read_images",
+        supports_parallel=True,
+        func=run_read_images,
+        description="按顺序读取本地图片（PNG、JPEG、GIF、WebP）。支持绝对路径和相对于当前工作目录的路径。",
+        parameters={
+            "type": "object",
+            "properties": {"paths": {"type": "array", "items": {"type": "string"}, "minItems": 1}},
+            "required": ["paths"],
             "additionalProperties": False,
         },
         uses_context=True,
