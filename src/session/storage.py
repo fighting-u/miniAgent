@@ -133,7 +133,7 @@ def _track_call(session: Session, message: dict[str, Any]) -> None:
         del session.pending_calls[message["call_id"]]
 
 
-def append(session: Session, item: Any, model_name: str | None = None) -> None:
+def append(session: Session, item: Any, model_name: str | None = None, *, is_error: bool | None = None) -> None:
     """按 API 原字段追加一条记录，仅模型消息与推理附带模型名称。"""
     if session.turn_id < 0:
         raise ValueError("请先通过 start_turn 开始用户请求")
@@ -148,7 +148,9 @@ def append(session: Session, item: Any, model_name: str | None = None) -> None:
     if payload.get("type") not in MESSAGE_TYPES:
         raise ValueError(f"不支持的会话项类型：{payload.get('type')}")
     _validate_call(session, payload)
-    metadata = {"api_format": API_FORMAT}
+    metadata: dict[str, Any] = {"api_format": API_FORMAT}
+    if is_error is not None:
+        metadata["is_error"] = is_error
     if model_name is not None and payload["type"] in {"message", "reasoning"}:
         metadata["model_name"] = model_name
     payload["metadata"] = metadata
@@ -190,13 +192,13 @@ def start_turn(session: Session, text: str) -> dict[str, Any]:
 
 def recover_pending_tools(session: Session) -> list[dict[str, Any]]:
     """为中断且未落盘结果的调用补充未确认说明，不重新执行任何工具。"""
+    # 延迟导入以避免 common 与会话管理器循环依赖。
+    from src.common.common import to_openai_tool_output
+    from src.tools.tool import text_result
+
     results = []
     for call_id in list(session.pending_calls):
-        result = {
-            "type": "function_call_output",
-            "call_id": call_id,
-            "output": "上次运行中断，未保存此工具的执行结果；是否执行及其效果无法确认。请根据当前用户请求重新判断，不要假定工具已成功。",
-        }
-        append(session, result)
+        result = to_openai_tool_output(call_id, text_result("上次运行中断，未保存此工具的执行结果；是否执行及其效果无法确认。请根据当前用户请求重新判断，不要假定工具已成功。", is_error=True))
+        append(session, result, is_error=True)
         results.append(result)
     return results

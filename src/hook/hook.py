@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
-from src.tools.tool import ToolContext
+from src.tools.tool import TextContent, ToolContext, ToolResult
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
@@ -38,16 +38,11 @@ def tool_request_log_hook(tool_call: Any, arguments: dict[str, Any]) -> None:
     return None
 
 
-def tool_output_log_hook(tool_call: Any, output: str) -> None:
-    """在工具执行后输出工具结果的前 200 个字符。"""
-    logger.info("[Hook] %s 输出预览：%s", tool_call.name, output[:200])
-    return None
-
-
-def large_output_hook(tool_call: Any, output: str) -> None:
+def large_output_hook(tool_call: Any, output: ToolResult) -> None:
     """在工具输出超过十万个字符时输出提醒日志。"""
-    if len(output) > 100_000:
-        logger.warning("[Hook] %s 输出较大，共 %d 个字符", tool_call.name, len(output))
+    size = sum(len(block.text) if isinstance(block, TextContent) else len(block.data) for block in output.content)
+    if size > 100_000:
+        logger.warning("[Hook] %s 输出较大，共 %d 个字符", tool_call.name, size)
     return None
 
 
@@ -69,7 +64,6 @@ def summary_hook(messages: list[Any]) -> None:
 # 注册当前已有的 Hook 扩展逻辑，注册顺序就是同一事件的执行顺序。
 register_hook("PreUserPromptSubmit", workdir_log_hook)
 register_hook("PreToolUse", tool_request_log_hook)
-register_hook("PostToolUse", tool_output_log_hook)
 register_hook("PostToolUse", large_output_hook)
 register_hook("PostToolBatch", plan_reminder_hook)
 register_hook("Stop", summary_hook)

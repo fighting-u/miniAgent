@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -10,12 +9,13 @@ from urllib.parse import urlsplit
 
 import anyio
 import httpx
+from mcp import types as mcp_types
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from src.config import Config
-from src.tools.tool import Tool, ToolContext
+from src.tools.tool import ImageContent, TextContent, Tool, ToolContext, ToolResult, text_result
 
 
 # MCP 连接与工具发现的总等待时间，以及单次工具调用的等待时间。
@@ -30,6 +30,34 @@ logger = logging.getLogger(__name__)
 def normalize_mcp_name(name: str) -> str:
     """统一修正 MCP 服务器名和工具名，将非常规字符逐个替换为下划线。"""
     return re.sub(r"[^A-Za-z0-9_-]", "_", name) or "_"
+
+
+def from_mcp_result(result: mcp_types.CallToolResult) -> ToolResult:
+    """将mcp工具结果规范转化为当前程序自定义工具结果规范，优先读取标准内容块，仅在为空时解析工具的结构化返回值。"""
+    blocks: list[TextContent | ImageContent] = []
+    reason = ""
+    if result.content:
+        items = [block.model_dump(mode="json", by_alias=True, exclude_none=True) for block in result.content]
+    elif result.structuredContent is not None:
+        value = result.structuredContent.get("result", result.structuredContent)
+        items = value if isinstance(value, list) else [value]
+    else:
+        items = []
+
+    for item in items:
+        kind = item.get("type") if isinstance(item, dict) else None
+        if kind == "text" and isinstance(item.get("text"), str):
+            blocks.append(TextContent(item["text"]))
+            if not reason:
+                reason = item["text"]
+        elif kind == "image" and isinstance(item.get("data"), str) and isinstance(item.get("mimeType"), str):
+            blocks.append(ImageContent(item["mimeType"], item["data"]))
+        else:
+            logger.warning("暂不支持 MCP 内容块：%s", kind)
+            blocks.append(TextContent(f"暂不支持 MCP 内容类型 {kind or '未知'}"))
+    if result.isError:
+        return text_result(reason or "远端工具报告失败，未提供错误说明", is_error=True)
+    return ToolResult(blocks)
 
 
 class MCPManager:
@@ -165,20 +193,15 @@ class MCPManager:
 
     async def _call_tool(
         self, session: ClientSession, name: str, arguments: dict[str, Any], _context: ToolContext,
-    ) -> str:
-        """通过绑定的连接和原始名称调用工具，沿用现有 MCP 结果格式。"""
+    ) -> ToolResult:
+        """使用绑定的连接调用工具，并转换 MCP 返回的内容块。"""
         try:
             result = await session.call_tool(name, arguments)
-            content = [
-                block.model_dump(mode="json", by_alias=True, exclude_none=True)
-                if block.type == "text" else {"type": block.type, "text": "暂不支持此类型的 MCP 内容"}
-                for block in result.content
-            ]
-            return json.dumps({"content": content, "structuredContent": result.structuredContent,
-                               "isError": result.isError}, ensure_ascii=False)
+            return from_mcp_result(result)
         except Exception as error:
             logger.warning("MCP 工具 %s 调用失败：%s", name, error)
-            return json.dumps({"isError": True, "error": f"MCP 调用失败：{error}"}, ensure_ascii=False)
+            return text_result(f"MCP 调用失败：{error}", is_error=True)
+
 
     async def stop(self) -> None:
         """统一取消任务，等待 SDK 关闭 stdio 子进程或 HTTP 会话及客户端。"""

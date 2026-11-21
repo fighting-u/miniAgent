@@ -2,6 +2,8 @@ from pathlib import Path
 
 import yaml
 
+from src.tools.tool import ToolResult, text_result
+
 
 # 技能目录名，每个技能使用一个子目录和 SKILL.md。
 SKILLS_DIR_NAME = "skills"
@@ -51,11 +53,11 @@ class SkillLoader:
             return "（暂无可用技能）"
         return "\n".join(f"- {name}: {skill['description']}" for name, skill in self.skills.items())
 
-    def load(self, name: str) -> str:
+    def load(self, name: str) -> ToolResult:
         """按名称读取技能完整说明，名称不存在时返回可用技能列表。"""
         skill = self.skills.get(name)
         if skill is not None:
-            return Path(skill["path"]).read_text(encoding="utf-8")
+            return text_result(Path(skill["path"]).read_text(encoding="utf-8"))
 
         available = ", ".join(self.skills) or "(none)"
-        return f"Error: Unknown skill '{name}'. Available: {available}"
+        return text_result(f"未知技能 {name}，可用技能：{available}", is_error=True)

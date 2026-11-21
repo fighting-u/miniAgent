@@ -2,12 +2,12 @@ import asyncio
 import json
 import logging
 from inspect import iscoroutinefunction
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from openai.types.responses import ResponseFunctionToolCall
 
 from src.channels.base import InboundMessage, MessageDispatcher
-from src.common.common import persist_and_dispatch_items
+from src.common.common import persist_and_dispatch_items, to_openai_tool_output
 from src.config import Config
 from src.hook.hook import trigger_hooks
 from src.security.tool_guard import audit_tool_request
@@ -15,7 +15,7 @@ from src.session.session import Session
 from src.session.session_manager import SessionManager
 from src.tools.local_tools import register_local_tools
 from src.tools.mcp_manager import MCPManager
-from src.tools.tool import Tool, ToolContext
+from src.tools.tool import Tool, ToolContext, ToolResult, text_result
 
 
 # 工具注册和调用的日志记录器。
@@ -51,7 +51,7 @@ class ToolManager:
         self._tools[tool.name] = tool
 
     def register_local_tool(
-        self, *, name: str, func: Callable[..., Any], description: str,
+        self, *, name: str, func: Callable[..., ToolResult | Awaitable[ToolResult]], description: str,
         parameters: dict[str, Any], strict: bool | None = None, uses_context: bool = False,
         supports_parallel: bool = False,
     ) -> None:
@@ -60,7 +60,7 @@ class ToolManager:
         properties = parameters["properties"]
 
         # 装饰器
-        async def execute(arguments: dict[str, Any], context: ToolContext) -> Any:
+        async def execute(arguments: dict[str, Any], context: ToolContext) -> ToolResult:
             """校验模型参数，避免覆盖注册时绑定或由 Agent 传入的内部依赖。"""
             if unexpected := arguments.keys() - properties.keys():
                 raise TypeError(f"未声明的工具参数：{', '.join(sorted(unexpected))}")
@@ -84,8 +84,8 @@ class ToolManager:
     async def execute(
         self, call: ResponseFunctionToolCall, context: ToolContext, session: Session,
         inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
-    ) -> str:
-        """解析并审核单个工具请求，按注册属性持锁执行，返回模型所需的字符串。"""
+    ) -> ToolResult:
+        """执行工具"""
         try:
             # 这里是因为claude返回就是python字典，而openAI是json，要转换下
             arguments = json.loads(call.arguments)
@@ -93,7 +93,7 @@ class ToolManager:
                 raise TypeError("工具参数必须是 JSON 对象")
         except (json.JSONDecodeError, TypeError) as error:
             logger.warning("工具 %s 参数无效：%s", call.name, error)
-            return f"工具参数无效：{error}, 请检查工具调用格式"
+            return text_result(f"工具参数无效：{error}, 请检查工具调用格式", is_error=True)
 
         # 工具执行前触发 Hook
         trigger_hooks("PreToolUse", call, arguments)
@@ -102,16 +102,17 @@ class ToolManager:
             call.name, arguments, self._config, context, session, inbound_message, message_dispatcher,
         )
         if feedback is not None:
-            return feedback
+            return text_result(feedback, is_error=True)
 
         tool = self._tools.get(call.name)
         if tool is None:
             logger.warning("调用了未注册的工具：%s", call.name)
-            return f"工具不存在: {call.name}，请检查工具名称"
-        # 统一分发本地与 MCP 工具；当前模型输出协议仍使用字符串结果。
+            return text_result(f"工具不存在: {call.name}，请检查工具名称", is_error=True)
+        # 获取读写锁。
         lock = session.tool_lock.reader_lock if tool.supports_parallel else session.tool_lock.writer_lock
         async with lock:
-            output = str(await tool.execute(arguments, context))
+            # 不管本地，mcp工具，统一执行入口
+            output = await tool.execute(arguments, context)
         trigger_hooks("PostToolUse", call, output)
         return output
 
@@ -131,10 +132,13 @@ class ToolManager:
                     output = await task
                 except Exception as error:
                     logger.exception("工具 %s 执行失败，call_id=%s", call.name, call.call_id)
-                    output = f"工具执行失败：{error}"
-                result = {"type": "function_call_output", "call_id": call.call_id, "output": output}
+                    output = text_result(str(error), is_error=True)
+                result = to_openai_tool_output(call.call_id, output)
+                preview = output.log_output()
+                logger.info("工具 %s，call_id=%s：%s", call.name, call.call_id, preview)
                 await persist_and_dispatch_items(
                     inbound_message, session, [result], session_manager, message_dispatcher,
+                    is_error=output.is_error, output_preview=preview,
                 )
                 session.messages.append(result)
         except BaseException:

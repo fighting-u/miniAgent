@@ -202,7 +202,15 @@ class TerminalUI:
                 text = str(item_value(item, "arguments", ""))
             elif kind == "function_call_output":
                 label = "工具结果"
-                text = str(item_value(item, "output", ""))
+                output = item_value(item, "output", "")
+                if isinstance(output, list):
+                    # 历史中的图文结果按块展示，避免打印图片 Data URL。
+                    text = "\n".join(
+                        block["text"] if block["type"] == "input_text" else f"[{block['type']}]"
+                        for block in output
+                    )
+                else:
+                    text = str(output)
             elif kind == "web_search_call":
                 label = "联网搜索"
                 text = str(item_value(item, "action", ""))

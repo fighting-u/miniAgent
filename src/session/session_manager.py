@@ -117,9 +117,9 @@ class SessionManager:
         session.messages.append(message)
         return message
 
-    def append(self, session: Session, item: Any, model_name: str | None = None) -> None:
+    def append(self, session: Session, item: Any, model_name: str | None = None, *, is_error: bool | None = None) -> None:
         """由调用方取得会话占用，委托 storage 保存原始模型或工具消息。"""
-        storage.append(session, item, model_name=model_name)
+        storage.append(session, item, model_name=model_name, is_error=is_error)
 
     def reload(self, session: Session) -> None:
         """执行中断后从已落盘记录重建同一会话的状态，保留来源占用信息。"""

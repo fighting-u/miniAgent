@@ -10,7 +10,7 @@ from functools import partial
 from src.config import Config, PROJECT_ROOT
 from src.memory.memory import load_memory
 from src.tools.skill import SKILLS_DIR_NAME, SkillLoader
-from src.tools.tool import ToolContext
+from src.tools.tool import ToolContext, ToolResult, text_result
 
 if TYPE_CHECKING:
     from src.tools.tool_manager import ToolManager
@@ -26,19 +26,19 @@ def resolve_path(path: str, context: ToolContext) -> Path:
     return (context.cwd / path).resolve()
 
 
-def run_get_model_name(*, model_name: str) -> str:
+def run_get_model_name(*, model_name: str) -> ToolResult:
     """读取与当前模型请求相同的统一配置，返回配置的模型名称。"""
-    return model_name
+    return text_result(model_name)
 
 
-def run_get_current_time() -> str:
+def run_get_current_time() -> ToolResult:
     """返回系统本地当前时间，使用带时区偏移的 ISO 8601 格式，精确到秒。"""
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return text_result(datetime.now().astimezone().isoformat(timespec="seconds"))
 
 
 # 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
-def run_powershell(command: str, workdir: str | None = None, *, timeout: int, context: ToolContext) -> str:
-    """在本次调用的工作目录执行 PowerShell，并以字符串返回结果。"""
+def run_powershell(command: str, workdir: str | None = None, *, timeout: int, context: ToolContext) -> ToolResult:
+    """在本次调用的工作目录执行 PowerShell，并返回退出状态和输出。"""
     try:
         cwd = resolve_path(workdir if workdir is not None else ".", context)
         completed = subprocess.run(
@@ -58,53 +58,58 @@ def run_powershell(command: str, workdir: str | None = None, *, timeout: int, co
             timeout=timeout,
             check=False,
         )
-        return json.dumps({"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}, ensure_ascii=False)
+        output = json.dumps({"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}, ensure_ascii=False)
+        return text_result(output, is_error=completed.returncode != 0)
     except subprocess.TimeoutExpired as error:
-        return json.dumps(
-            {"error": f"PowerShell 执行超过 {timeout} 秒，已终止。", "stdout": error.stdout or "", "stderr": error.stderr or ""}, ensure_ascii=False
-        )
+        def partial_text(value: bytes | str | None) -> str:
+            """解码超时前已捕获的命令输出。"""
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
+
+        output = json.dumps({"error": f"PowerShell 执行超过 {timeout} 秒，已终止。",
+                             "stdout": partial_text(error.stdout), "stderr": partial_text(error.stderr)}, ensure_ascii=False)
+        return text_result(output, is_error=True)
     except ValueError as error:
-        return f"错误：{error}"
+        return text_result(str(error), is_error=True)
     except OSError as error:
-        return f"无法启动 PowerShell：{error}"
+        return text_result(f"无法启动 PowerShell：{error}", is_error=True)
 
 
-def run_read(path: str, limit: int | None = None, *, context: ToolContext) -> str:
+def run_read(path: str, limit: int | None = None, *, context: ToolContext) -> ToolResult:
     """读取指定的 UTF-8 文本文件，可选择限制返回的行数。"""
     try:
         lines = resolve_path(path, context).read_text(encoding="utf-8").splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
-        return "\n".join(lines)
+        return text_result("\n".join(lines))
     except Exception as error:
-        return f"Error: {error}"
+        return text_result(str(error), is_error=True)
 
 
-def run_write(path: str, content: str, *, context: ToolContext) -> str:
+def run_write(path: str, content: str, *, context: ToolContext) -> ToolResult:
     """向指定的 UTF-8 文本文件写入内容，并按需创建父目录。"""
     try:
         file_path = resolve_path(path, context)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} bytes to {file_path}"
+        return text_result(f"已向 {file_path} 写入 {len(content)} 个字符")
     except Exception as error:
-        return f"Error: {error}"
+        return text_result(str(error), is_error=True)
 
 
-def run_edit(path: str, old_text: str, new_text: str, *, context: ToolContext) -> str:
+def run_edit(path: str, old_text: str, new_text: str, *, context: ToolContext) -> ToolResult:
     """在指定的 UTF-8 文本文件中替换第一次出现的指定文本。"""
     try:
         file_path = resolve_path(path, context)
         text = file_path.read_text(encoding="utf-8")
         if old_text not in text:
-            return f"Error: text not found in {file_path}"
+            return text_result(f"在 {file_path} 中找不到待替换文本", is_error=True)
         file_path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-        return f"Edited {file_path}"
+        return text_result(f"已修改 {file_path}")
     except Exception as error:
-        return f"Error: {error}"
+        return text_result(str(error), is_error=True)
 
 
-def run_glob(pattern: str, workdir: str | None = None, *, context: ToolContext) -> str:
+def run_glob(pattern: str, workdir: str | None = None, *, context: ToolContext) -> ToolResult:
     """从指定目录或默认工作区查找 glob 匹配项，最多返回 200 项。"""
     import glob as glob_module
 
@@ -112,7 +117,7 @@ def run_glob(pattern: str, workdir: str | None = None, *, context: ToolContext) 
         cwd = resolve_path(workdir if workdir is not None else ".", context)
         if not cwd.is_dir():
             logger.warning("glob 工作目录不存在或不是目录：%s", cwd)
-            return f"错误：工作目录不存在或不是目录：{cwd}"
+            return text_result(f"错误：工作目录不存在或不是目录：{cwd}", is_error=True)
         matches: set[str] = set()
         for match in glob_module.glob(pattern, root_dir=cwd, recursive=True):
             # 返回绝对路径，供读写工具直接使用。
@@ -120,9 +125,9 @@ def run_glob(pattern: str, workdir: str | None = None, *, context: ToolContext) 
         shown = sorted(matches)[:200]
         if len(matches) > 200:
             shown.append("... (more matches omitted; narrow the pattern)")
-        return "\n".join(shown) if shown else "(no matches)"
+        return text_result("\n".join(shown) if shown else "没有匹配项")
     except Exception as error:
-        return f"Error: {error}"
+        return text_result(str(error), is_error=True)
 
 
 class Plan:
@@ -210,18 +215,18 @@ class Plan:
 
 
 # 当前 turn 的计划由 Agent 随工具调用传入，供本轮工具使用。
-async def run_update_plan(plan: list[Any] | str, *, context: ToolContext) -> str:
+async def run_update_plan(plan: list[Any] | str, *, context: ToolContext) -> ToolResult:
     """在事件循环内更新当前 turn 的计划，展示由工具结果事件交给通道完成。"""
     try:
         output = context.plan.update(plan)
     except ValueError as error:
         logger.warning("当前 turn 的计划更新失败：%s", error)
-        return f"错误：{error}"
+        return text_result(str(error), is_error=True)
     logger.info("当前 turn 计划已更新")
-    return output
+    return text_result(output)
 
 
-def run_load_skill(name: str) -> str:
+def run_load_skill(name: str) -> ToolResult:
     """读取技能完整说明，调用时扫描目录以取得当前可用技能。"""
     return SkillLoader(PROJECT_ROOT / SKILLS_DIR_NAME).load(name)
 

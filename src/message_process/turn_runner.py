@@ -67,7 +67,7 @@ class TurnRunner:
             model_name = self.config.model
             while True:
                 # 上下文压缩
-                messages[:] = await compactor.prepare(messages, current_request)
+                # messages[:] = await compactor.prepare(messages, current_request)
                 # 发送当前对话，请求模型继续推理或调用工具。
                 try:
                     response = await self.client.responses.create(model=model_name, instructions=instructions, input=messages, tools=available_tools)

@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from openai import AsyncOpenAI
 
+from src.tools.tool import ToolResult, text_result
 from src.config import Config, PROJECT_ROOT
 
 
@@ -162,10 +163,10 @@ def read_memory_file(filename: str) -> str:
         return ""
 
 
-def load_memory(filename: str) -> str:
+def load_memory(filename: str) -> ToolResult:
     """为主模型按文件名读取完整记忆，不存在时返回明确错误。"""
     content = read_memory_file(filename)
-    return content or f"错误：未找到记忆文件 '{filename}'。"
+    return text_result(content) if content else text_result(f"未找到记忆文件 '{filename}'。", is_error=True)
 
 
 def extract_json_array(text: str) -> list[Any]:
