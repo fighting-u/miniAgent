@@ -8,7 +8,6 @@ from openai import AsyncOpenAI
 from src.channels.base import InboundMessage, MessageDispatcher
 from src.common.common import persist_and_dispatch_items
 from src.config import Config
-from src.context_compact.context_compactor import ContextCompactor, is_context_length_error
 from src.hook.hook import trigger_hooks
 from src.memory.memory import extract_memories, load_memories
 from src.session.session_manager import SessionManager
@@ -66,8 +65,6 @@ class TurnRunner:
             # 固定本轮使用的模型名称，也用于持久化元信息。
             model_name = self.config.model
             while True:
-                # 上下文压缩
-                # messages[:] = await compactor.prepare(messages, current_request)
                 # 发送当前对话，请求模型继续推理或调用工具。
                 try:
                     response = await self.client.responses.create(
