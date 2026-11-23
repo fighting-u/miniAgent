@@ -33,6 +33,7 @@ class MessageProcessor:
     ) -> None:
         """保存共享依赖，并创建并发信号量和轮次执行器。"""
         self.config = config
+        self.tool_manager = tool_manager  # 提供估算上下文窗口用量所需的工具定义。
         self.session_manager = session_manager
         self.compactor = compactor  # 全局共享上下文压缩器，供手动 /compact 和自动检测共用。
         self.hook_manager = hook_manager  # 触发用户输入前的 Hook。
@@ -117,6 +118,7 @@ class MessageProcessor:
         try:
             async with self.max_concurrent_requests:
                 await self.session_manager.message_dispatcher.send_status(message, "正在压缩上下文...")
+                tokens_before_compact = session.token_usage.total_reported_tokens
                 try:
                     self.session_manager.recover_pending_tools(session)
                     await self.compactor.compact(session, phase="manual")
@@ -124,8 +126,12 @@ class MessageProcessor:
                     self.session_manager.reload(session)
                     raise
                 await self.session_manager.message_dispatcher.send_status(message, "上下文已压缩。")
+                usage_text = self.compactor.format_usage_summary(
+                    session, tokens_before_compact, tools=self.tool_manager.get_schemas()
+                )
         finally:
             self.session_manager.release_session_lock(session)
+        await self.session_manager.message_dispatcher.send(message, {"type": "usage_summary", "text": usage_text})
 
     async def _command(self, message: InboundMessage) -> None:
         """统一识别并处理所有斜杠命令；菜单在客户端展示，文件与压缩操作由常驻端执行。"""
@@ -188,7 +194,9 @@ class MessageProcessor:
                 self.hook_manager.trigger("PreUserPromptSubmit", Path.cwd().resolve())
                 tokens_before_turn = session.token_usage.total_reported_tokens
                 await self.turn_runner.run_turn(message)
-                usage_text = self.compactor.format_usage_summary(session, tokens_before_turn)
+                usage_text = self.compactor.format_usage_summary(
+                    session, tokens_before_turn, tools=self.tool_manager.get_schemas()
+                )
         finally:
             self.session_manager.release_session_lock(session)
         await self.session_manager.message_dispatcher.send(message, {"type": "usage_summary", "text": usage_text})
