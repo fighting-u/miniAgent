@@ -131,24 +131,18 @@ class SessionManager:
         session.messages.extend(results)
         return results
 
-    def persist_user_message(self, session: Session, text: str) -> dict[str, Any]:
+    def append_user_message(self, session: Session, text: str) -> dict[str, Any]:
         """由调用方取得会话占用，递增 turn_id、持久化用户输入并追加到内存历史。"""
         message = storage.persist_user_message(session, text)
         session.messages.append(message)
         return message
 
-    def append(self, session: Session, item: Any, model_name: str | None = None, *, is_error: bool | None = None) -> None:
-        """由调用方取得会话占用，委托 storage 保存原始模型或工具消息。"""
-        storage.append(session, item, model_name=model_name, is_error=is_error, message_types=self.message_types)
-
     async def persist_and_dispatch_items(
         self, inbound_message: InboundMessage, session: Session, items: list[Any],
         *, model_name: str | None = None, is_error: bool | None = None, output_preview: str | None = None,
     ) -> None:
-        """按原顺序落盘消息条目，再序列化并发送给来源通道。"""
-        # todo: 直接批量入盘啊
-        for item in items:
-            self.append(session, item, model_name=model_name, is_error=is_error)
+        """由调用方取得会话占用，按原顺序批量落盘消息条目，再序列化并发送给来源通道。"""
+        storage.append_items(session, items, model_name=model_name, is_error=is_error, message_types=self.message_types)
         event_items = [
             {**item, "output": output_preview} if output_preview is not None else serializable(item)
             for item in items

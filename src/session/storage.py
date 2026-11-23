@@ -243,59 +243,64 @@ def _update_pending_tool_calls(session: Session, message: dict[str, Any]) -> Non
         del session.pending_calls[message["call_id"]]
 
 
-def _write_record(session: Session, record: dict[str, Any]) -> None:
-    """序列化并持久化单条 JSONL 记录，落盘成功后更新 persisted 与 ordinal。"""
-    line = json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
+def _write_records(session: Session, records: list[dict[str, Any]]) -> None:
+    """序列化多条 JSONL 记录，一次打开文件写入并只 fsync 一次，落盘成功后更新 persisted 与 ordinal。"""
+    content = "".join(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n" for record in records)
     try:
         if not session.persisted:
             session.path.parent.mkdir(parents=True, exist_ok=True)
         # 首次写入独占创建，避免覆盖同名文件；恢复的空文件也按已有会话追加。
         with session.path.open("a" if session.persisted else "x", encoding="utf-8", newline="\n") as target:
-            target.write(line)
+            target.write(content)
             target.flush()
             os.fsync(target.fileno())
     except OSError:
-        logger.exception("会话记录写入失败：%s", session.path)
+        logger.exception("会话记录写入失败：%s 条数=%s", session.path, len(records))
         raise
     if not session.persisted:
         session.persisted = True
         logger.info("首次用户输入已保存，创建会话文件：%s", session.path)
-    session.ordinal += 1
+    session.ordinal += len(records)
 
 
-def append(
-    session: Session, item: Any, model_name: str | None = None, *,
+def append_items(
+    session: Session, items: list[Any], model_name: str | None = None, *,
     is_error: bool | None = None, message_types: frozenset[str] = BASE_MESSAGE_TYPES,
 ) -> None:
-    """按 API 原字段追加一条记录，仅模型消息与推理附带模型名称。"""
+    """按 API 原字段批量追加记录，整批校验通过后一次落盘；仅模型消息与推理附带模型名称。"""
     if session.turn_id < 0:
         raise ValueError("请先通过 persist_user_message 写入用户输入并开启新轮次")
-    if hasattr(item, "model_dump"):
-        payload = item.model_dump(mode="json", by_alias=True, exclude_none=True)
-    elif isinstance(item, dict):
-        payload = dict(item)
-    else:
-        raise TypeError("会话项必须为字典或 SDK 响应对象")
-    if "type" not in payload and "role" in payload:
-        payload["type"] = "message"
-    if payload.get("type") not in message_types:
-        raise ValueError(f"不支持的会话项类型：{payload.get('type')}")
-    _validate_call(session, payload)
-    metadata: dict[str, Any] = {"api_format": API_FORMAT}
-    if is_error is not None:
-        metadata["is_error"] = is_error
-    if model_name is not None and payload["type"] in {"message", "reasoning"}:
-        metadata["model_name"] = model_name
-    payload["metadata"] = metadata
-    record = {
-        "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-        "ordinal": session.ordinal,
-        "turn_id": session.turn_id,
-        "type": "messages",
-        "payload": omit_none(payload),
-    }
-    _write_record(session, record)
-    _update_pending_tool_calls(session, payload)
+    timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    records = []
+    for index, item in enumerate(items):
+        if hasattr(item, "model_dump"):
+            payload = item.model_dump(mode="json", by_alias=True, exclude_none=True)
+        elif isinstance(item, dict):
+            payload = dict(item)
+        else:
+            raise TypeError("会话项必须为字典或 SDK 响应对象")
+        if "type" not in payload and "role" in payload:
+            payload["type"] = "message"
+        if payload.get("type") not in message_types:
+            raise ValueError(f"不支持的会话项类型：{payload.get('type')}")
+        _validate_call(session, payload)
+        metadata: dict[str, Any] = {"api_format": API_FORMAT}
+        if is_error is not None:
+            metadata["is_error"] = is_error
+        if model_name is not None and payload["type"] in {"message", "reasoning"}:
+            metadata["model_name"] = model_name
+        payload["metadata"] = metadata
+        records.append({
+            "timestamp": timestamp,
+            "ordinal": session.ordinal + index,
+            "turn_id": session.turn_id,
+            "type": "messages",
+            "payload": omit_none(payload),
+        })
+    _write_records(session, records)
+    # 与单条写入一致：落盘成功后再更新待完成工具调用。
+    for record in records:
+        _update_pending_tool_calls(session, record["payload"])
 
 
 def append_token_usage(
@@ -313,7 +318,7 @@ def append_token_usage(
         "type": "token_usage",
         "payload": payload,
     }
-    _write_record(session, record)
+    _write_records(session, [record])
 
 
 def append_compacted(
@@ -347,7 +352,7 @@ def append_compacted(
         "payload": omit_none(validated),
         "metadata": metadata,
     }
-    _write_record(session, record)
+    _write_records(session, [record])
 
 
 def persist_user_message(session: Session, text: str) -> dict[str, Any]:
@@ -356,15 +361,15 @@ def persist_user_message(session: Session, text: str) -> dict[str, Any]:
         raise ValueError("写入新用户输入前，请先处理上次中断的工具调用")
     session.turn_id += 1
     message = {"type": "message", "role": "user", "content": text}
-    append(session, message)
+    append_items(session, [message])
     return message
 
 
 def recover_pending_tools(session: Session) -> list[dict[str, Any]]:
-    """为中断且未落盘结果的调用补充未确认说明，不重新执行任何工具。"""
-    results = []
-    for call_id in list(session.pending_calls):
-        result = to_openai_tool_output(call_id, text_result("上次运行中断，未保存此工具的执行结果；是否执行及其效果无法确认。请根据当前用户请求重新判断，不要假定工具已成功。", is_error=True))
-        append(session, result, is_error=True)
-        results.append(result)
+    """为中断且未落盘结果的调用补充未确认说明并一次批量落盘，不重新执行任何工具。"""
+    results = [
+        to_openai_tool_output(call_id, text_result("上次运行中断，未保存此工具的执行结果；是否执行及其效果无法确认。请根据当前用户请求重新判断，不要假定工具已成功。", is_error=True))
+        for call_id in session.pending_calls
+    ]
+    append_items(session, results, is_error=True)
     return results

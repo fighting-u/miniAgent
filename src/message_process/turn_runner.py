@@ -54,6 +54,7 @@ class TurnRunner:
             available_tools = self.tool_manager.get_schemas()
             # 轮前先补齐上次中断的工具调用，再检测上一轮留下的上下文是否需要自动压缩。
             self.session_manager.recover_pending_tools(session)
+            # turn前压缩
             await self.compactor.maybe_compact(
                 session,
                 phase="pre_turn",
@@ -62,7 +63,7 @@ class TurnRunner:
                 on_status=on_status,
             )
             # 在压缩后才加入用户输入，避免用户消息被压缩掉
-            self.session_manager.persist_user_message(session, inbound_message.input)
+            self.session_manager.append_user_message(session, inbound_message.input)
 
             messages = session.messages
             # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
