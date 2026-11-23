@@ -38,6 +38,7 @@ class MessageProcessor:
         self.hook_manager = hook_manager  # 触发用户输入前的 Hook。
         self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests = requests
+        # todo: 后面应限制，/resume no必须紧跟着/resume出现
         self.session_choices: dict[str, list[str]] = {}  # 各入口最近展示的编号顺序，不随会话更新时间改变。
         self.turn_runner = TurnRunner(
             client=client,
@@ -97,7 +98,9 @@ class MessageProcessor:
             await self.session_manager.message_dispatcher.send(message, {"type": "error", "text": "当前会话正在处理请求，请稍后再试。"})
         else:
             logger.warning("会话占用冲突：session_id=%s 请求人=%s 会话当前的owner=%s", session.id, requester_id, session.owner_id)
-            await self.session_manager.message_dispatcher.send(message, {"type": "error", "text": f"该会话已被 {session.owner_id} 占用，请稍后再试。"})
+            await self.session_manager.message_dispatcher.send(
+                message, {"type": "error", "text": f"该会话已被 {session.owner_id} 占用，请稍后再试。"}
+            )
         return False
 
     async def _compact(self, message: InboundMessage, argument: str) -> None:
@@ -146,10 +149,7 @@ class MessageProcessor:
             session_id, _, confirmation = argument.partition(" ")
             if confirmation != "confirm":
                 raise ValueError("删除前需要客户端二次确认。")
-            if any(
-                task is not asyncio.current_task() and request.session_id == session_id
-                for task, request in self.requests.items()
-            ):
+            if any(task is not asyncio.current_task() and request.session_id == session_id for task, request in self.requests.items()):
                 raise ValueError("该会话仍有等待或执行中的请求，请稍后删除。")
             self.session_manager.delete(session_id)
             if session_id == message.session_id:
@@ -158,52 +158,57 @@ class MessageProcessor:
         else:
             raise ValueError("未知命令，可用命令：/new、/resume、/compact、/delete、/q")
 
+    async def _chat(self, message: InboundMessage) -> None:
+        """处理审批答复或执行聊天轮次，轮次结束后发送用量摘要。"""
+        # 用户审批处理
+        requester_id = get_owner_id(message.channel_id, message.reply_target)
+        session = self.session_manager.sessions.get(message.session_id)
+        if session is not None and session.owner_id == requester_id and session.pending_approval is not None:
+            approval = session.pending_approval
+            if message.input in {"yes", "no"} and not approval.done():
+                approval.set_result(message.input == "yes")
+                logger.info("工具审批答复：session=%s answer=%s", session.id, message.input)
+            # 审批期间的输入到此为止，finally 仍会发送 done 以清理通道回复记录。
+            return
+
+        # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
+        # 按内存、磁盘、新建的顺序取得会话，/new 的标识到这里才创建对象。
+        if session is None:
+            session = self.session_manager.get_or_create(message.session_id)
+        if not await self._acquire_session(message, session, requester_id):
+            # 获取会话锁失败
+            return
+        try:
+            if not message.session_id:
+                message.session_id = session.id
+                # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
+                await self.session_manager.message_dispatcher.send(message, {"type": "session_created"})
+            async with self.max_concurrent_requests:
+                self.session_manager.bind(message.channel_id, session.id)
+                self.hook_manager.trigger("PreUserPromptSubmit", Path.cwd().resolve())
+                tokens_before_turn = session.token_usage.total_reported_tokens
+                await self.turn_runner.run_turn(message)
+                usage_text = self.compactor.format_usage_summary(session, tokens_before_turn)
+        finally:
+            self.session_manager.release_session_lock(session)
+        await self.session_manager.message_dispatcher.send(message, {"type": "usage_summary", "text": usage_text})
+
     async def process_message(self, inbound_message: InboundMessage) -> None:
         """按输入类型分发，普通聊天优先匹配当前会话的待审批请求。"""
         # todo: 优化done事件，event类型
-        context_window_usage = None
         try:
             inbound_message.input = inbound_message.input.strip()
-            # todo: 优化太多If,else
-            if inbound_message.type == InboundType.GET_HISTORY:
-                await self._history(inbound_message)
-            elif inbound_message.type == InboundType.LIST_SESSIONS:
-                await self._list_sessions(inbound_message)
-            elif inbound_message.type == InboundType.COMMAND:
-                await self._command(inbound_message)
-            elif inbound_message.input:
-                # 用户审批处理
-                requester_id = get_owner_id(inbound_message.channel_id, inbound_message.reply_target)
-                session = self.session_manager.sessions.get(inbound_message.session_id)
-                if session is not None and session.owner_id == requester_id and session.pending_approval is not None:
-                    approval = session.pending_approval
-                    if inbound_message.input in {"yes", "no"} and not approval.done():
-                        approval.set_result(inbound_message.input == "yes")
-                        logger.info("工具审批答复：session=%s answer=%s", session.id, inbound_message.input)
-                    # 审批期间的输入到此为止，finally 仍会发送 done 以清理通道回复记录。
-                    return
-
-                # 接受时固定目标会话，后续其他入口切换会话不改变本次请求归属。
-                # 按内存、磁盘、新建的顺序取得会话，/new 的标识到这里才创建对象。
-                if session is None:
-                    session = self.session_manager.get_or_create(inbound_message.session_id)
-                if not await self._acquire_session(inbound_message, session, requester_id):
-                    # 获取会话锁失败
-                    return
-                try:
-                    if not inbound_message.session_id:
-                        inbound_message.session_id = session.id
-                        # 首次创建只回传 ID，入口保存标识，不刷新界面或回显用户消息。
-                        await self.session_manager.message_dispatcher.send(inbound_message, {"type": "session_created"})
-                    async with self.max_concurrent_requests:
-                        self.session_manager.bind(inbound_message.channel_id, session.id)
-                        self.hook_manager.trigger("PreUserPromptSubmit", Path.cwd().resolve())
-                        await self.turn_runner.run_turn(inbound_message)
-                        context_window_usage = self.compactor.format_window_usage(session)
-                finally:
-                    self.session_manager.release_session_lock(session)
+            match inbound_message.type:
+                case InboundType.GET_HISTORY:
+                    await self._history(inbound_message)
+                case InboundType.LIST_SESSIONS:
+                    await self._list_sessions(inbound_message)
+                case InboundType.COMMAND:
+                    await self._command(inbound_message)
+                case InboundType.CHAT if inbound_message.input:
+                    await self._chat(inbound_message)
         except Exception as error:
             logger.exception("请求处理失败：request=%s session=%s", inbound_message.request_id, inbound_message.session_id)
             await self.session_manager.message_dispatcher.send(inbound_message, {"type": "error", "text": str(error)})
         finally:
-            await self.session_manager.message_dispatcher.send_done(inbound_message, context_window_usage)
+            await self.session_manager.message_dispatcher.send_done(inbound_message)

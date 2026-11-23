@@ -283,10 +283,11 @@ class QQChannel(Channel):
             await self._send_text(reply, "\n".join(lines) or "暂无历史会话。")
         elif event_type in {"status", "error", "request_approval"}:
             await self._send_text(reply, event["text"])
+        elif event_type == "usage_summary":
+            if reply.texts:
+                reply.texts.append(event["text"])
         elif event_type == "done":
             try:
-                if reply.texts and "usage_text" in event:
-                    reply.texts.append(event["usage_text"])
                 await self._send_text(reply, "\n\n".join(reply.texts))
             finally:
                 self.replies.pop(event["request_id"], None)

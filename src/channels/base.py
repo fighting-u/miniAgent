@@ -72,12 +72,9 @@ class MessageDispatcher:
         """向当前请求入口发送状态提示事件。"""
         await self.send(message, {"type": "status", "text": text})
 
-    async def send_done(self, message: InboundMessage, usage_text: str | None = None) -> None:
-        """发送结束事件，有窗口用量文本时一并附上。"""
-        event = {"type": "done"}
-        if usage_text:
-            event["usage_text"] = usage_text
-        await self.send(message, event)
+    async def send_done(self, message: InboundMessage) -> None:
+        """通知入口当前请求已结束。"""
+        await self.send(message, {"type": "done"})
 
     async def send(self, message: InboundMessage, event: dict[str, Any]) -> bool:
         """补充请求关联信息并发送；断线不会向上中断 Agent。"""
