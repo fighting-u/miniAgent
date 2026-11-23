@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+from src.compact.estimator import estimate_text
 from src.tools.tool import TextContent, ToolResult
 
 
@@ -38,3 +39,56 @@ def to_openai_tool_output(call_id: str, result: ToolResult) -> dict[str, Any]:
             else:
                 output.append({"type": "input_image", "image_url": f"data:{block.mime_type};base64,{block.data}"})
     return {"type": "function_call_output", "call_id": call_id, "output": output}
+
+
+def _take_prefix_by_bytes(text: str, max_bytes: int) -> str:
+    """沿 Unicode 字符边界截取不超过指定 UTF-8 字节数的前缀。"""
+    if max_bytes <= 0:
+        return ""
+    used = 0
+    chars: list[str] = []
+    for char in text:
+        size = len(char.encode("utf-8"))
+        if used + size > max_bytes:
+            break
+        chars.append(char)
+        used += size
+    return "".join(chars)
+
+
+def _take_suffix_by_bytes(text: str, max_bytes: int) -> str:
+    """沿 Unicode 字符边界截取不超过指定 UTF-8 字节数的后缀。"""
+    if max_bytes <= 0:
+        return ""
+    used = 0
+    chars: list[str] = []
+    for char in reversed(text):
+        size = len(char.encode("utf-8"))
+        if used + size > max_bytes:
+            break
+        chars.append(char)
+        used += size
+    chars.reverse()
+    return "".join(chars)
+
+
+def truncate_middle_to_budget(text: str, budget_tokens: int) -> str | None:
+    """按 token 预算保留文本首尾各占预算的二分之一，并插入中文省略标记；连标记都放不下时返回 None。"""
+    if budget_tokens <= 0:
+        return None
+    if estimate_text(text) <= budget_tokens:
+        return text
+    total_bytes = len(text.encode("utf-8"))
+    max_bytes = budget_tokens * 4
+    probe_marker = f"…中间已省略 {total_bytes} 字节…"
+    marker_bytes = len(probe_marker.encode("utf-8"))
+    if marker_bytes > max_bytes:
+        return None
+    available_bytes = max_bytes - marker_bytes
+    head_bytes = available_bytes // 2
+    tail_bytes = available_bytes - head_bytes
+    head = _take_prefix_by_bytes(text, head_bytes)
+    tail = _take_suffix_by_bytes(text, tail_bytes)
+    omitted_bytes = max(0, total_bytes - len(head.encode("utf-8")) - len(tail.encode("utf-8")))
+    result = f"{head}…中间已省略 {omitted_bytes} 字节…{tail}"
+    return result if estimate_text(result) <= budget_tokens else None

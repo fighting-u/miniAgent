@@ -9,7 +9,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from src.channels.base import InboundMessage
 from src.common.common import to_openai_tool_output
 from src.config import Config
-from src.hook.hook import trigger_hooks
+from src.hook.hook import HookManager
 from src.security.tool_guard import audit_tool_request
 from src.session.session import Session
 from src.session.session_manager import SessionManager
@@ -24,10 +24,11 @@ logger = logging.getLogger(__name__)
 class ToolManager:
     """管理本地和 MCP 工具的执行，汇总这两类工具和模型托管工具的声明。"""
 
-    def __init__(self, config: Config, session_manager: SessionManager) -> None:
+    def __init__(self, config: Config, session_manager: SessionManager, hook_manager: HookManager) -> None:
         """创建各 turn 共用的工具注册表和 MCP 管理器。"""
         self._config = config
         self.session_manager = session_manager  # 保存工具结果，并通过会话的消息分发器发送审批请求。
+        self._hook_manager = hook_manager  # 触发工具执行前后的 Hook。
         self._mcp = MCPManager(config)
         self._tools: dict[str, Tool] = {}
 
@@ -97,7 +98,7 @@ class ToolManager:
             return text_result(f"工具参数无效：{error}, 请检查工具调用格式", is_error=True)
 
         # 工具执行前触发 Hook
-        trigger_hooks("PreToolUse", call, arguments)
+        self._hook_manager.trigger("PreToolUse", call, arguments)
         # 统一审计工具请求，先检查高危规则，再检查是否需要审批。
         feedback = await audit_tool_request(
             call.name, arguments, self._config, context, session, inbound_message, self.session_manager.message_dispatcher,
@@ -114,7 +115,7 @@ class ToolManager:
         async with lock:
             # 不管本地，mcp工具，统一执行入口
             output = await tool.execute(arguments, context)
-        trigger_hooks("PostToolUse", call, output)
+        self._hook_manager.trigger("PostToolUse", call, output)
         return output
 
     async def execute_batch(
@@ -150,7 +151,7 @@ class ToolManager:
             raise
 
         # 整批工具结果之后追加 Hook 可能返回的系统消息。
-        extra_input = trigger_hooks("PostToolBatch", context)
+        extra_input = self._hook_manager.trigger("PostToolBatch", context)
         if extra_input:
             extra_message = {"role": "system", "content": extra_input}
             await self.session_manager.persist_and_dispatch_items(

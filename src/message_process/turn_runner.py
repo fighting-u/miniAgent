@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from src.channels.base import InboundMessage
 from src.compact.compactor import ContextCompactor
 from src.config import Config
-from src.hook.hook import trigger_hooks
+from src.hook.hook import HookManager
 from src.memory.memory import extract_memories, load_memories, memory_messages
 from src.session.session_manager import SessionManager
 from src.system_prompt import build_system_prompt
@@ -31,14 +31,16 @@ class TurnRunner:
         tool_manager: ToolManager,
         session_manager: SessionManager,
         compactor: ContextCompactor,
+        hook_manager: HookManager,
         background_tasks: list[asyncio.Task],
     ) -> None:
-        """使用共享的模型、工具、会话管理器、压缩器和后台任务列表。"""
+        """使用共享的模型、工具、会话管理器、压缩器、Hook 管理器和后台任务列表。"""
         self.client = client
         self.config = config
         self.tool_manager = tool_manager
         self.session_manager = session_manager
         self.compactor = compactor
+        self.hook_manager = hook_manager
         self.background_tasks = background_tasks
 
     # 核心
@@ -92,7 +94,7 @@ class TurnRunner:
                     # 工具请求已随响应保存，批内结果由 ToolManager 按原顺序落盘并发送。
                     await self.tool_manager.execute_batch(tool_calls, tool_context, session, inbound_message)
                 else:
-                    extra_input = trigger_hooks("Stop", messages)
+                    extra_input = self.hook_manager.trigger("Stop", messages)
                     # todo: 后续优化点，不简单以不调用工具为结束标志
                     if extra_input is None:
                         break

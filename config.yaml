@@ -21,12 +21,14 @@ compact_keep_user_tokens: 20000
 
 
 # 工具权限相关配置
+# 单个工具文本输出块的 token 上限，超出时首尾截断并将完整内容转存到 /.task_outputs。
+tool_output_max_tokens: 10000
 # PowerShell 单次执行的最长秒数。
 powershell_timeout: 120
 # 允许目录及其子目录，相对路径以本配置文件所在目录为基准。
 allowed_dirs:
 - .
-- D:/projects/others/interview_post_crawl/面经
+- D:/projects
 
 # AgentRuntime 同时处理请求的最大数量。
 max_concurrent_requests: 10

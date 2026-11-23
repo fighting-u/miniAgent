@@ -2,27 +2,66 @@ import logging
 from pathlib import Path
 from typing import Any, Callable
 
+from src.common.common import truncate_middle_to_budget
+from src.compact.estimator import estimate_text
+from src.config import Config, PROJECT_ROOT
 from src.tools.tool import TextContent, ToolContext, ToolResult
 
 # 当前模块使用的日志记录器。
 logger = logging.getLogger(__name__)
 
-# Hook 事件注册表，用于在核心流程的固定位置挂载外部扩展逻辑。
-HOOKS: dict[str, list[Callable[..., Any]]] = {"PreUserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "PostToolBatch": [], "Stop": []}
+# 超长工具输出完整内容的转存目录名，固定位于项目根目录下，不随 cwd 变化。
+TASK_OUTPUT_DIR_NAME = ".task_outputs"
 
 
-def trigger_hooks(event: str, *args: Any) -> Any | None:
-    """依次触发指定事件的 Hook，任一 Hook 返回非 None 值时立即返回该值。"""
-    for callback in HOOKS[event]:
-        result = callback(*args)
-        if result is not None:
-            return result
-    return None
+class HookManager:
+    """管理 Hook 的注册与触发，持有运行配置，供需要配置的 Hook 使用。"""
 
+    def __init__(self, config: Config) -> None:
+        """保存配置，创建事件注册表并注册当前已有的 Hook 扩展逻辑。"""
+        self._config = config
+        # Hook 事件注册表，用于在核心流程的固定位置挂载外部扩展逻辑。
+        self._hooks: dict[str, list[Callable[..., Any]]] = {"PreUserPromptSubmit": [], "PreToolUse": [], "PostToolUse": [], "PostToolBatch": [], "Stop": []}
+        # 注册顺序就是同一事件的执行顺序；大输出日志排在截断前，记录原始大小。
+        self.register("PreUserPromptSubmit", workdir_log_hook)
+        self.register("PreToolUse", tool_request_log_hook)
+        self.register("PostToolUse", large_output_hook)
+        self.register("PostToolUse", self.truncate_output_hook)
+        self.register("PostToolBatch", plan_reminder_hook)
+        self.register("Stop", summary_hook)
 
-def register_hook(event: str, callback: Callable[..., Any]) -> None:
-    """向指定事件注册一个 Hook 回调函数。"""
-    HOOKS[event].append(callback)
+    def trigger(self, event: str, *args: Any) -> Any | None:
+        """依次触发指定事件的 Hook，任一 Hook 返回非 None 值时立即返回该值。"""
+        for callback in self._hooks[event]:
+            result = callback(*args)
+            if result is not None:
+                return result
+        return None
+
+    def register(self, event: str, callback: Callable[..., Any]) -> None:
+        """向指定事件注册一个 Hook 回调函数。"""
+        self._hooks[event].append(callback)
+
+    def truncate_output_hook(self, tool_call: Any, output: ToolResult) -> None:
+        """文本块超过配置的 token 上限时，完整内容转存到临时文件，并就地替换为首尾保留的截断文本。"""
+        max_tokens = self._config.tool_output_max_tokens
+        for index, block in enumerate(output.content):
+            if not isinstance(block, TextContent):
+                continue
+            original_tokens = estimate_text(block.text)
+            if original_tokens <= max_tokens:
+                continue
+            output_dir = PROJECT_ROOT / TASK_OUTPUT_DIR_NAME
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{tool_call.call_id}_{index}.txt"
+            output_path.write_text(block.text, encoding="utf-8")
+            truncated = truncate_middle_to_budget(block.text, max_tokens)
+            block.text = (
+                f"{truncated}\n[输出过长已截断，完整内容已保存到 {output_path}，"
+                f"请用 PowerShell 的 Select-String 或 Get-Content 配合 -Skip/-First 分段查看]"
+            )
+            logger.info("[Hook] %s 输出约 %d token，超过上限 %d，已截断，完整内容保存到：%s", tool_call.name, original_tokens, max_tokens, output_path)
+        return None
 
 
 def workdir_log_hook(cwd: Path) -> None:
@@ -59,11 +98,3 @@ def summary_hook(messages: list[Any]) -> None:
     tool_count = sum(1 for message in messages[last_user_index + 1 :] if isinstance(message, dict) and message.get("type") == "function_call_output")
     logger.info("[Hook] 本轮请求共产生 %d 个工具结果", tool_count)
     return None
-
-
-# 注册当前已有的 Hook 扩展逻辑，注册顺序就是同一事件的执行顺序。
-register_hook("PreUserPromptSubmit", workdir_log_hook)
-register_hook("PreToolUse", tool_request_log_hook)
-register_hook("PostToolUse", large_output_hook)
-register_hook("PostToolBatch", plan_reminder_hook)
-register_hook("Stop", summary_hook)

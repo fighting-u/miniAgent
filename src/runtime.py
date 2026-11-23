@@ -8,6 +8,7 @@ from src.channels.base import InboundMessage, MessageDispatcher
 from src.channels.manager import ChannelManager
 from src.compact.compactor import ContextCompactor
 from src.config import Config, PROJECT_ROOT
+from src.hook.hook import HookManager
 from src.message_process.message_processor import MessageProcessor
 from src.session.session_manager import SessionManager
 from src.session.storage import SESSION_DIR_NAME
@@ -29,7 +30,8 @@ class AgentRuntime:
         self.requests: dict[asyncio.Task, InboundMessage] = {}  # 跟踪已接受的输入任务，退出时等待完成。
         self.message_dispatcher = MessageDispatcher()
         self.session_manager = SessionManager(PROJECT_ROOT / SESSION_DIR_NAME, config, self.message_dispatcher)  # 管理会话历史、存储和入口绑定。
-        self.tool_manager = ToolManager(config, self.session_manager)  # 共享工具管理器，start 时注册工具并建立 MCP 连接。
+        self.hook_manager = HookManager(config)  # 管理全局 Hook 的注册与触发。
+        self.tool_manager = ToolManager(config, self.session_manager, self.hook_manager)  # 共享工具管理器，start 时注册工具并建立 MCP 连接。
         self.compactor = ContextCompactor(self.client, config, self.session_manager)  # 全局共享上下文压缩器。
         self.channels = ChannelManager(config, self.message_dispatcher, self.submit, self.session_manager)  # 共享配置和消息分发器，并传入提交回调。
         # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
@@ -41,6 +43,7 @@ class AgentRuntime:
             tool_manager=self.tool_manager,
             session_manager=self.session_manager,
             compactor=self.compactor,
+            hook_manager=self.hook_manager,
             requests=self.requests,
             background_tasks=self.background_tasks,
         )

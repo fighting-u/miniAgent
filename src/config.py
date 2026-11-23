@@ -30,6 +30,7 @@ class Config:
     effective_window_percent: int = field(kw_only=True)  # 有效上下文窗口占原始窗口的百分比（1~100）。
     auto_compact_percent: int = field(kw_only=True)  # 自动触发上下文压缩的百分比阈值（1~100）。
     compact_keep_user_tokens: int = field(kw_only=True)  # 压缩重建历史时保留用户原文的 token 预算上限。
+    tool_output_max_tokens: int = field(kw_only=True)  # 单个工具文本输出块的 token 上限，超出时截断并转存完整内容。
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> "Config":
@@ -60,6 +61,8 @@ class Config:
             raise ValueError("auto_compact_percent 不能大于 effective_window_percent")
         if type(config.compact_keep_user_tokens) is not int or config.compact_keep_user_tokens <= 0:
             raise ValueError("compact_keep_user_tokens 必须为正整数")
+        if type(config.tool_output_max_tokens) is not int or config.tool_output_max_tokens <= 0:
+            raise ValueError("tool_output_max_tokens 必须为正整数")
         if not isinstance(config.model, str) or not isinstance(config.api_key_env, str):
             raise ValueError("model 和 api_key_env 必须是文本")
         if config.base_url is not None and not isinstance(config.base_url, str):

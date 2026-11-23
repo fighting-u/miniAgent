@@ -7,7 +7,7 @@ from openai import AsyncOpenAI
 from src.channels.base import InboundMessage, InboundType
 from src.compact.compactor import ContextCompactor
 from src.config import Config
-from src.hook.hook import trigger_hooks
+from src.hook.hook import HookManager
 from src.message_process.turn_runner import TurnRunner
 from src.session.session import Session, get_owner_id
 from src.session.session_manager import SessionManager
@@ -27,6 +27,7 @@ class MessageProcessor:
         tool_manager: ToolManager,
         session_manager: SessionManager,
         compactor: ContextCompactor,
+        hook_manager: HookManager,
         requests: dict[asyncio.Task, InboundMessage],
         background_tasks: list[asyncio.Task],
     ) -> None:
@@ -34,6 +35,7 @@ class MessageProcessor:
         self.config = config
         self.session_manager = session_manager
         self.compactor = compactor  # 全局共享上下文压缩器，供手动 /compact 和自动检测共用。
+        self.hook_manager = hook_manager  # 触发用户输入前的 Hook。
         self.max_concurrent_requests = asyncio.Semaphore(config.max_concurrent_requests)  # 请求并发上限。
         self.requests = requests
         self.session_choices: dict[str, list[str]] = {}  # 各入口最近展示的编号顺序，不随会话更新时间改变。
@@ -43,6 +45,7 @@ class MessageProcessor:
             tool_manager=tool_manager,
             session_manager=session_manager,
             compactor=compactor,
+            hook_manager=hook_manager,
             background_tasks=background_tasks,
         )
 
@@ -194,7 +197,7 @@ class MessageProcessor:
                         await self.session_manager.message_dispatcher.send(inbound_message, {"type": "session_created"})
                     async with self.max_concurrent_requests:
                         self.session_manager.bind(inbound_message.channel_id, session.id)
-                        trigger_hooks("PreUserPromptSubmit", Path.cwd().resolve())
+                        self.hook_manager.trigger("PreUserPromptSubmit", Path.cwd().resolve())
                         await self.turn_runner.run_turn(inbound_message)
                         context_window_usage = self.compactor.format_window_usage(session)
                 finally:
