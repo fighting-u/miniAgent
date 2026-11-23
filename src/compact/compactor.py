@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from openai import APIStatusError
 
 from src.common.common import extract_total_tokens, truncate_middle_to_budget
-from src.prompt.compact import COMPACT_PROMPT, SUMMARY_PREFIX
+from src.prompt.compact import *
 from src.prompt.developer import SYSTEM_PROMPT
 from src.compact.estimator import estimate_context, estimate_text
 from src.models.registry import ModelInfo
@@ -206,7 +206,7 @@ class ContextCompactor:
     async def compact(self, session: Session, *, phase: str) -> None:
         """从同一份原历史生成摘要和保留项，待磁盘提交成功后切换窗口。"""
         original = list(session.messages)
-        compaction_messages: list[Any] = [*original, {"type": "message", "role": "user", "content": COMPACT_PROMPT}]
+        compaction_messages: list[Any] = [*original, {"type": "message", "role": "user", "content": COMPACT_PROMPT_zh}]
         dropped_items = 0
         # codex就这样做的，直接先请求报错了才移除，并且每次只移除1项；并不会先移除到预估不会超窗后再请求。
         # 猜测原因1.本来配置的最大窗口就不是真的最大窗口；2.预估不准确，尽量多地保留
@@ -242,7 +242,7 @@ class ContextCompactor:
             raise ValueError("压缩模型未返回完整的文本摘要，已保留原上下文。")
 
         kept = retain_user_messages(original, session.summary_index, self.keep_user_tokens)
-        summary = {"type": "message", "role": "user", "content": f"{SUMMARY_PREFIX}\n{summary_text}"}
+        summary = {"type": "message", "role": "user", "content": f"{SUMMARY_PREFIX_zh}\n{summary_text}"}
         self.session_manager.install_compacted(session, [*kept, summary], extract_total_tokens(response.usage))
         logger.info(
             "上下文压缩完成：session=%s model=%s phase=%s original_items=%d dropped_items=%d kept_user_items=%d checkpoint_ordinal=%d",

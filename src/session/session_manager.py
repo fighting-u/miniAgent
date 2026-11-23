@@ -172,14 +172,14 @@ class SessionManager:
 
     def record_usage(self, session: Session, source: str, usage: Any) -> None:
         """持久化响应实际报告的 token 用量并更新内存基准与累计数；缺 usage 时不编造记录。"""
-        total_tokens = extract_total_tokens(usage)
-        if total_tokens is None:
+        request_total_tokens = extract_total_tokens(usage)
+        if request_total_tokens is None:
             return
-        storage.append_token_usage(session, source=source, total_tokens=total_tokens)
-        session.token_usage.total_reported_tokens += total_tokens
+        storage.append_token_usage(session, source=source, request_total_tokens=request_total_tokens)
+        session.token_usage.total_reported_tokens += request_total_tokens
         # 分正常请求(main) 和 压缩compact请求 2类，compact就更新上次普通主响应的 token 数和已计算的消息数
         if source == "main":
-            session.token_usage.last_total_tokens = total_tokens
+            session.token_usage.last_total_tokens = request_total_tokens
             session.token_usage.covered_items = len(session.messages)
 
     def install_compacted(self, session: Session, replacement: list[dict[str, Any]], summary_tokens: int | None) -> None:

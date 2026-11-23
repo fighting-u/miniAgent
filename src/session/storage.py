@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.common import to_openai_tool_output
-from src.prompt.compact import SUMMARY_PREFIX
+from src.prompt.compact import SUMMARY_PREFIXES
 from src.session.session import Session, SessionTokenUsage
 from src.tools.tool import text_result
 
@@ -132,7 +132,7 @@ def _validate_compacted_payload(payload: Any) -> list[dict[str, Any]]:
     for item in payload:
         messages.append(dict(item))
     last_content = messages[-1].get("content")
-    if not isinstance(last_content, str) or not last_content.startswith(SUMMARY_PREFIX + "\n"):
+    if not isinstance(last_content, str) or not any(last_content.startswith(prefix + "\n") for prefix in SUMMARY_PREFIXES):
         raise ValueError("compacted.payload 末项必须为带固定前缀的摘要文本")
     return messages
 
@@ -159,12 +159,12 @@ def _replay_token_usage(session: Session, payload: Any) -> None:
     source = payload.get("source")
     if source not in TOKEN_USAGE_SOURCES:
         raise ValueError(f"不支持的 token_usage 来源：{source}")
-    total_tokens = payload.get("total_tokens")
-    if type(total_tokens) is not int or total_tokens < 0:
-        raise ValueError("token_usage.total_tokens 必须为非负整数")
-    session.token_usage.total_reported_tokens += total_tokens
+    request_total_tokens = payload.get("request_total_tokens")
+    if type(request_total_tokens) is not int or request_total_tokens < 0:
+        raise ValueError("token_usage.request_total_tokens 必须为非负整数")
+    session.token_usage.total_reported_tokens += request_total_tokens
     if source == "main":
-        session.token_usage.last_total_tokens = total_tokens
+        session.token_usage.last_total_tokens = request_total_tokens
         session.token_usage.covered_items = len(session.messages)
 
 
@@ -305,10 +305,10 @@ def append_token_usage(
     session: Session,
     *,
     source: str,
-    total_tokens: int,
+    request_total_tokens: int,
 ) -> None:
     """持久化单次主请求或失败摘要请求的实际 token 用量。"""
-    payload: dict[str, Any] = {"source": source, "total_tokens": total_tokens}
+    payload: dict[str, Any] = {"source": source, "request_total_tokens": request_total_tokens}
     record = {
         "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
         "ordinal": session.ordinal,

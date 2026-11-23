@@ -38,7 +38,6 @@ def run_get_current_time() -> ToolResult:
     return text_result(datetime.now().astimezone().isoformat(timespec="seconds"))
 
 
-# 当前已实现的 shell 工具处理函数，底层仍使用 Windows PowerShell。
 def run_powershell(command: str, workdir: str | None = None, *, timeout: int, context: ToolContext) -> ToolResult:
     """在本次调用的工作目录执行 PowerShell，并返回退出状态和输出。"""
     try:

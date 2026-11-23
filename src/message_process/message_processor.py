@@ -125,13 +125,12 @@ class MessageProcessor:
                 except BaseException:
                     self.session_manager.reload(session)
                     raise
-                await self.session_manager.message_dispatcher.send_status(message, "上下文已压缩。")
                 usage_text = self.compactor.format_usage_summary(
                     session, tokens_before_compact, tools=self.tool_manager.get_schemas()
                 )
         finally:
             self.session_manager.release_session_lock(session)
-        await self.session_manager.message_dispatcher.send(message, {"type": "usage_summary", "text": usage_text})
+        await self.session_manager.message_dispatcher.send_status(message, f"上下文已压缩。\n\n{usage_text}")
 
     async def _command(self, message: InboundMessage) -> None:
         """统一识别并处理所有斜杠命令；菜单在客户端展示，文件与压缩操作由常驻端执行。"""
