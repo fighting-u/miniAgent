@@ -15,8 +15,15 @@ from prompt_toolkit.shortcuts import clear
 from prompt_toolkit.styles import Style
 
 
+# todo: 改成统一注册制
 # 输入框支持的斜杠命令及中文补全说明。
-COMMANDS = {"/new": "开启新对话", "/resume": "选择历史会话", "/delete": "选择并删除会话", "/q": "断开终端"}
+COMMANDS = {
+    "/new": "开启新对话",
+    "/resume": "选择历史会话",
+    "/compact": "压缩当前会话上下文",
+    "/delete": "选择并删除会话",
+    "/q": "断开终端",
+}
 
 # 终端输入、菜单和角色标题的轻量配色。
 UI_STYLE = Style.from_dict({
@@ -117,7 +124,7 @@ class TerminalUI:
             placeholder=[("class:placeholder", "输入问题，或输入 / 查看命令")],
             completer=CommandCompleter(), complete_while_typing=True,
             key_bindings=menu_bindings(ignore_blank=True), style=UI_STYLE, reserve_space_for_menu=len(COMMANDS),
-            bottom_toolbar=f"{model_name} · {workdir or Path.cwd()}\n/new 新对话   /resume 历史会话   /delete 删除会话   /q 断开终端",
+            bottom_toolbar=f"{model_name} · {workdir or Path.cwd()}\n/new 新对话   /resume 历史会话   /compact 压缩上下文   /delete 删除会话   /q 断开终端",
         )
 
     async def read_input(self) -> str:

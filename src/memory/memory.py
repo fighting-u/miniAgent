@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 
 from src.tools.tool import ToolResult, text_result
 from src.config import Config, PROJECT_ROOT
+from src.session.session import Session
 
 
 # 共享长期记忆目录名。
@@ -44,6 +45,13 @@ RECENT_USER_TURNS = 3
 
 # 发送给记忆选择模型的最近用户文本最大字符数。
 RECENT_USER_CHAR_LIMIT = 4000
+
+
+def memory_messages(session: Session) -> list[Any]:
+    """过滤交接摘要项，避免长期记忆召回和提取把模型归纳文本当成用户原话。"""
+    if session.summary_index is None:
+        return list(session.messages)
+    return [item for index, item in enumerate(session.messages) if index != session.summary_index]
 
 
 def message_text(message: Any) -> str:

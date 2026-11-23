@@ -6,8 +6,8 @@ from typing import Any, Awaitable, Callable
 
 from openai.types.responses import ResponseFunctionToolCall
 
-from src.channels.base import InboundMessage, MessageDispatcher
-from src.common.common import persist_and_dispatch_items, to_openai_tool_output
+from src.channels.base import InboundMessage
+from src.common.common import to_openai_tool_output
 from src.config import Config
 from src.hook.hook import trigger_hooks
 from src.security.tool_guard import audit_tool_request
@@ -24,9 +24,10 @@ logger = logging.getLogger(__name__)
 class ToolManager:
     """管理本地和 MCP 工具的执行，汇总这两类工具和模型托管工具的声明。"""
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, session_manager: SessionManager) -> None:
         """创建各 turn 共用的工具注册表和 MCP 管理器。"""
         self._config = config
+        self.session_manager = session_manager  # 保存工具结果，并通过会话的消息分发器发送审批请求。
         self._mcp = MCPManager(config)
         self._tools: dict[str, Tool] = {}
 
@@ -83,7 +84,7 @@ class ToolManager:
 
     async def execute(
         self, call: ResponseFunctionToolCall, context: ToolContext, session: Session,
-        inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
+        inbound_message: InboundMessage,
     ) -> ToolResult:
         """执行工具"""
         try:
@@ -99,7 +100,7 @@ class ToolManager:
         trigger_hooks("PreToolUse", call, arguments)
         # 统一审计工具请求，先检查高危规则，再检查是否需要审批。
         feedback = await audit_tool_request(
-            call.name, arguments, self._config, context, session, inbound_message, message_dispatcher,
+            call.name, arguments, self._config, context, session, inbound_message, self.session_manager.message_dispatcher,
         )
         if feedback is not None:
             return text_result(feedback, is_error=True)
@@ -118,12 +119,11 @@ class ToolManager:
 
     async def execute_batch(
         self, calls: list[ResponseFunctionToolCall], context: ToolContext, session: Session,
-        inbound_message: InboundMessage, message_dispatcher: MessageDispatcher,
-        session_manager: SessionManager,
+        inbound_message: InboundMessage,
     ) -> None:
         """并发提交已落盘的调用，按模型调用顺序保存、发送结果并更新会话上下文。"""
         tasks = [
-            asyncio.create_task(self.execute(call, context, session, inbound_message, message_dispatcher))
+            asyncio.create_task(self.execute(call, context, session, inbound_message))
             for call in calls
         ]
         try:
@@ -136,8 +136,8 @@ class ToolManager:
                 result = to_openai_tool_output(call.call_id, output)
                 preview = output.log_output()
                 logger.info("工具 %s，call_id=%s：%s", call.name, call.call_id, preview)
-                await persist_and_dispatch_items(
-                    inbound_message, session, [result], session_manager, message_dispatcher,
+                await self.session_manager.persist_and_dispatch_items(
+                    inbound_message, session, [result],
                     is_error=output.is_error, output_preview=preview,
                 )
                 session.messages.append(result)
@@ -153,8 +153,8 @@ class ToolManager:
         extra_input = trigger_hooks("PostToolBatch", context)
         if extra_input:
             extra_message = {"role": "system", "content": extra_input}
-            await persist_and_dispatch_items(
-                inbound_message, session, [extra_message], session_manager, message_dispatcher,
+            await self.session_manager.persist_and_dispatch_items(
+                inbound_message, session, [extra_message],
             )
             session.messages.append(extra_message)
 

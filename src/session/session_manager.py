@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 from copy import deepcopy
 from pathlib import Path
 from time import monotonic
@@ -7,7 +8,10 @@ from typing import Any
 
 from uuid6 import uuid7
 
+from src.channels.base import InboundMessage, MessageDispatcher
+from src.common.common import extract_total_tokens
 from src.config import Config
+from src.models.registry import get_model_info
 from src.session import storage
 from src.session.session import Session
 
@@ -23,9 +27,12 @@ def serializable(item: Any) -> Any:
 class SessionManager:
     """管理会话状态与入口绑定，JSONL 操作委托给 storage。"""
 
-    def __init__(self, root: Path, config: Config) -> None:
+    def __init__(self, root: Path, config: Config, message_dispatcher: MessageDispatcher) -> None:
         """接收会话目录和配置，保存占用保留秒数，一次读取绑定，历史按需加载。"""
         self.root = root  # 会话 JSONL 和 bindings 文件所在目录。
+        self.message_dispatcher = message_dispatcher  # 将已落盘的消息分发给来源通道。
+        # 启动时校验默认模型已声明上下文窗口，供新建或加载会话初始化 model_info。
+        self.default_model_info = get_model_info(config.model)
         # 写入和恢复都接受基础消息，以及配置中各托管工具对应的调用记录。
         self.message_types = storage.BASE_MESSAGE_TYPES.union(f"{name}_call" for name in config.model_hosted_tools)
         self.session_owner_ttl = config.session_owner_ttl  # 当前轮结束后，原来源继续占用的秒数。
@@ -49,6 +56,7 @@ class SessionManager:
         if entry is None:
             return None
         session = storage.load(entry["path"], message_types=self.message_types)
+        session.model_info = self.default_model_info
         self.sessions[session.id] = session
         logger.info("已加载会话：%s", session.id)
         return session
@@ -59,6 +67,7 @@ class SessionManager:
         session = self.get(session_id)
         if session is None:
             session = storage.create(self.root, session_id)
+            session.model_info = self.default_model_info
             self.sessions[session.id] = session
             logger.info("首次输入已准备会话：%s", session.id)
         return session
@@ -70,7 +79,9 @@ class SessionManager:
         ]
 
     def try_acquire_session_lock(self, session: Session, requester_id: str) -> bool:
-        """同步判断并登记占用；其他来源尚未过期时直接拒绝，不等待。"""
+        """同步判断并登记占用；执行中（含同来源）或其他来源未过期时直接拒绝，不等待。"""
+        if math.isinf(session.expires_at):
+            return False
         if session.owner_id and session.owner_id != requester_id and session.expires_at > monotonic():
             return False
         if session.owner_id != requester_id:
@@ -112,10 +123,17 @@ class SessionManager:
         self.bindings = bindings
         logger.info("已保存入口会话绑定：channel=%s session=%s", channel_id, session_id)
 
-    def start_turn(self, session: Session, text: str) -> dict[str, Any]:
-        """由调用方取得会话占用，补齐中断工具结果并保存新的用户输入。"""
-        session.messages.extend(storage.recover_pending_tools(session))
-        message = storage.start_turn(session, text)
+    def recover_pending_tools(self, session: Session) -> list[dict[str, Any]]:
+        """由调用方取得会话占用，补齐中断工具调用结果并追加到内存历史。"""
+        if not session.pending_calls:
+            return []
+        results = storage.recover_pending_tools(session)
+        session.messages.extend(results)
+        return results
+
+    def persist_user_message(self, session: Session, text: str) -> dict[str, Any]:
+        """由调用方取得会话占用，递增 turn_id、持久化用户输入并追加到内存历史。"""
+        message = storage.persist_user_message(session, text)
         session.messages.append(message)
         return message
 
@@ -123,14 +141,54 @@ class SessionManager:
         """由调用方取得会话占用，委托 storage 保存原始模型或工具消息。"""
         storage.append(session, item, model_name=model_name, is_error=is_error, message_types=self.message_types)
 
+    async def persist_and_dispatch_items(
+        self, inbound_message: InboundMessage, session: Session, items: list[Any],
+        *, model_name: str | None = None, is_error: bool | None = None, output_preview: str | None = None,
+    ) -> None:
+        """按原顺序落盘消息条目，再序列化并发送给来源通道。"""
+        # todo: 直接批量入盘啊
+        for item in items:
+            self.append(session, item, model_name=model_name, is_error=is_error)
+        event_items = [
+            {**item, "output": output_preview} if output_preview is not None else serializable(item)
+            for item in items
+        ]
+        await self.message_dispatcher.send(inbound_message, {"type": "items", "items": event_items})
+
+    def record_usage(self, session: Session, source: str, usage: Any) -> None:
+        """持久化响应实际报告的 token 用量并更新内存基准与累计数；缺 usage 时不编造记录。"""
+        total_tokens = extract_total_tokens(usage)
+        if total_tokens is None:
+            return
+        storage.append_token_usage(session, source=source, total_tokens=total_tokens)
+        session.token_usage.total_reported_tokens += total_tokens
+        # 分正常请求(main) 和 压缩compact请求 2类，compact就更新上次普通主响应的 token 数和已计算的消息数
+        if source == "main":
+            session.token_usage.last_total_tokens = total_tokens
+            session.token_usage.covered_items = len(session.messages)
+
+    def install_compacted(self, session: Session, replacement: list[dict[str, Any]], summary_tokens: int | None) -> None:
+        """先向 JSONL 提交 compacted 检查点，落盘成功后原地替换内存历史并清空旧主基准。"""
+        new_total = session.token_usage.total_reported_tokens + (summary_tokens or 0)
+        storage.append_compacted(session, replacement, summary_tokens=summary_tokens, total_reported_tokens=new_total)
+        session.messages[:] = replacement
+        session.summary_index = len(replacement) - 1
+        session.token_usage.last_total_tokens = None
+        session.token_usage.covered_items = 0
+        session.token_usage.total_reported_tokens = new_total
+
     def reload(self, session: Session) -> None:
-        """执行中断后从已落盘记录重建同一会话的状态，保留来源占用信息。"""
+        """执行中断后从已落盘记录重建同一会话的状态，保留来源占用信息；未落盘会话直接跳过。"""
+        if not session.persisted:
+            return
         loaded = storage.load(session.path, message_types=self.message_types)
-        session.messages = loaded.messages
+        session.messages[:] = loaded.messages
         session.ordinal = loaded.ordinal
         session.turn_id = loaded.turn_id
         session.persisted = loaded.persisted
         session.pending_calls = loaded.pending_calls
+        session.token_usage = loaded.token_usage
+        session.summary_index = loaded.summary_index
 
     def delete(self, session_id: str) -> None:
         """删除没有执行中任务的会话，并清除所有指向该会话的持久化绑定。"""

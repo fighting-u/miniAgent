@@ -20,7 +20,6 @@ def build_system_prompt(config: Config, cwd: Path, relevant_memories: str = "") 
         f"可用技能：\n{SkillLoader(PROJECT_ROOT / SKILLS_DIR_NAME).catalog()}\n\n"
         "当某项技能适用于当前任务时，先使用 load_skill 工具读取它的完整说明，再按照说明执行。\n"
         f"\n可用长期记忆：\n{memory_catalog()}\n\n"
-        "当记忆目录中的某条摘要可能有助于当前任务时，使用 load_memory 工具按文件名读取完整内容。\n"
-        "当历史或工具结果已转存到本地时，只按需要使用关键词检索或分段读取相关片段，不要一次读回完整大文件。"
+        "当记忆目录中的某条摘要可能有助于当前任务时，使用 load_memory 工具按文件名读取完整内容。"
         f"{recalled_section}"
     )

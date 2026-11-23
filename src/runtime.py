@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 
 from src.channels.base import InboundMessage, MessageDispatcher
 from src.channels.manager import ChannelManager
+from src.compact.compactor import ContextCompactor
 from src.config import Config, PROJECT_ROOT
 from src.message_process.message_processor import MessageProcessor
 from src.session.session_manager import SessionManager
@@ -25,10 +26,11 @@ class AgentRuntime:
         if not config.api_key or not config.model.strip():
             raise ValueError(f"请在 config.yaml 配置 model，并设置 {config.api_key_env} 环境变量")
         self.client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)  # 构造客户端，stop 时关闭。
-        self.tool_manager = ToolManager(config)  # 共享工具管理器，start 时注册工具并建立 MCP 连接。
         self.requests: dict[asyncio.Task, InboundMessage] = {}  # 跟踪已接受的输入任务，退出时等待完成。
         self.message_dispatcher = MessageDispatcher()
-        self.session_manager = SessionManager(PROJECT_ROOT / SESSION_DIR_NAME, config)  # 管理会话历史、存储和入口绑定。
+        self.session_manager = SessionManager(PROJECT_ROOT / SESSION_DIR_NAME, config, self.message_dispatcher)  # 管理会话历史、存储和入口绑定。
+        self.tool_manager = ToolManager(config, self.session_manager)  # 共享工具管理器，start 时注册工具并建立 MCP 连接。
+        self.compactor = ContextCompactor(self.client, config, self.session_manager)  # 全局共享上下文压缩器。
         self.channels = ChannelManager(config, self.message_dispatcher, self.submit, self.session_manager)  # 共享配置和消息分发器，并传入提交回调。
         # 保留本进程创建的后台记忆任务，退出前显式等待并收集异常。
         self.background_tasks: list[asyncio.Task] = []
@@ -37,8 +39,8 @@ class AgentRuntime:
             config=config,
             client=self.client,
             tool_manager=self.tool_manager,
-            message_dispatcher=self.message_dispatcher,
             session_manager=self.session_manager,
+            compactor=self.compactor,
             requests=self.requests,
             background_tasks=self.background_tasks,
         )

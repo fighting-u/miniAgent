@@ -11,6 +11,14 @@ model_hosted_tools:
 - web_search
 - web_extractor
 
+# 上下文压缩相关配置（所有模型共用的策略参数）
+# 有效上下文窗口占模型原始窗口的百分比（1~100）。
+effective_window_percent: 95
+# 自动触发上下文压缩的百分比阈值（1~100，且不大于 effective_window_percent）。
+auto_compact_percent: 90
+# 压缩重建历史时，最多保留的用户原话 token 预算上限。
+compact_keep_user_tokens: 20000
+
 
 # 工具权限相关配置
 # PowerShell 单次执行的最长秒数。

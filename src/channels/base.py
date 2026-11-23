@@ -68,6 +68,10 @@ class MessageDispatcher:
         """创建通道实例的注册表，启动前注册以支持即时回复。"""
         self.channels: dict[str, Channel] = {}
 
+    async def send_status(self, message: InboundMessage, text: str) -> None:
+        """向当前请求入口发送状态提示事件。"""
+        await self.send(message, {"type": "status", "text": text})
+
     async def send(self, message: InboundMessage, event: dict[str, Any]) -> bool:
         """补充请求关联信息并发送；断线不会向上中断 Agent。"""
         envelope = {**event, "request_id": message.request_id, "session_id": message.session_id,

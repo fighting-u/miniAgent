@@ -11,6 +11,8 @@ dependencies = [
     # MCP 客户端 SDK；使用兼容项目 Python 3.10 要求的 1.x 接口。
     "mcp>=1.26.0,<2",
     "openai>=1.66.0",
+    # 从图片头读取宽高，用于估算上下文中的图片 token 消耗。
+    "pillow>=10.0.0",
     # 提供终端输入占位提示与斜杠命令补全菜单。
     "prompt-toolkit>=3.0.52",
     "python-dotenv>=1.0.0",

@@ -1,9 +1,23 @@
+import logging
 from typing import Any
 
-from src.channels.base import InboundMessage, MessageDispatcher
 from src.tools.tool import TextContent, ToolResult
-from src.session.session import Session
-from src.session.session_manager import SessionManager, serializable
+
+
+# 记录模型响应的用量字段异常。
+logger = logging.getLogger(__name__)
+
+
+def extract_total_tokens(usage: Any) -> int | None:
+    """从响应 usage 对象或字典中读取 total_tokens，缺失或无效时返回 None。"""
+    if usage is None:
+        logger.error("模型响应缺少 usage，无法记录本次 token 用量。")
+        return None
+    total = usage.get("total_tokens") if isinstance(usage, dict) else getattr(usage, "total_tokens", None)
+    if type(total) is int and total >= 0:
+        return total
+    logger.error("模型响应的 usage.total_tokens 缺失或无效：%r", total)
+    return None
 
 
 def to_openai_tool_output(call_id: str, result: ToolResult) -> dict[str, Any]:
@@ -24,16 +38,3 @@ def to_openai_tool_output(call_id: str, result: ToolResult) -> dict[str, Any]:
             else:
                 output.append({"type": "input_image", "image_url": f"data:{block.mime_type};base64,{block.data}"})
     return {"type": "function_call_output", "call_id": call_id, "output": output}
-
-
-async def persist_and_dispatch_items(
-    inbound_message: InboundMessage, session: Session, items: list[Any],
-    session_manager: SessionManager, message_dispatcher: MessageDispatcher,
-    *, model_name: str | None = None, is_error: bool | None = None, output_preview: str | None = None,
-) -> None:
-    """按原顺序落盘消息条目，再序列化并发送给来源通道。"""
-    for item in items:
-        session_manager.append(session, item, model_name=model_name, is_error=is_error)
-    await message_dispatcher.send(
-        inbound_message, {"type": "items", "items": [{**item, "output": output_preview} if output_preview is not None else serializable(item) for item in items]},
-    )

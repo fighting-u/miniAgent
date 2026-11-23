@@ -5,9 +5,20 @@ from typing import Any
 
 from aiorwlock import RWLock
 
+from src.models.registry import ModelInfo
+
 def get_owner_id(channel_id: str, reply_target: str) -> str:
     """将通道实例和回复目标编码为唯一来源标识，后续扩展只调整此函数。"""
     return f"{channel_id}:{reply_target}"
+
+
+@dataclass
+class SessionTokenUsage:
+    """保存用于窗口判断的主请求计数，以及会话已记录的实际消耗。"""
+
+    last_total_tokens: int | None = None  # 上次普通主响应的 usage.total_tokens；安装新历史后清空。
+    covered_items: int = 0  # 上次普通主响应的 last_total_tokens 已覆盖的消息数。
+    total_reported_tokens: int = 0  # 该会话总历史消耗的token数，包括主请求与压缩，长期记忆检索和提取的不包括
 
 
 @dataclass
@@ -27,6 +38,9 @@ class Session:
     pending_approval: Future[bool] | None = None  # 等待用户审核敏感工具请求
     tool_lock: RWLock = field(default_factory=RWLock)  # 同一会话内共享工具执行读写锁。
     approval_lock: Lock = field(default_factory=Lock)  # 同一时间只向用户展示一个待审批请求。
+    token_usage: SessionTokenUsage = field(default_factory=SessionTokenUsage)  # 主请求窗口计数基准与累计实际消耗。
+    summary_index: int | None = None  # 最近一次 compacted 末项摘要在有效历史中的位置；无压缩时为 None。
+    model_info: ModelInfo | None = None  # 本会话当前使用的模型静态元信息，支持按会话切换模型。
 
     @property
     def id(self) -> str:
