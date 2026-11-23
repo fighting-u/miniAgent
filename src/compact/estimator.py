@@ -7,10 +7,12 @@ import binascii
 import io
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from PIL import Image, UnidentifiedImageError
+
+from src.prompt.developer import SYSTEM_PROMPT
 
 if TYPE_CHECKING:
     from src.session.session import Session
@@ -113,11 +115,10 @@ def estimate_schema(tools: Sequence[dict[str, Any]]) -> int:
 def estimate_context(
     session: Session,
     *,
-    instructions_provider: Callable[[], str],
     tools: Sequence[dict[str, Any]],
 ) -> int:
     """以最近主响应校准估算，仅对尚未覆盖的历史项重新估算；无有效基准时走全量估算。"""
     token_usage = session.token_usage
     if token_usage.last_total_tokens is not None:
         return token_usage.last_total_tokens + estimate_items(session.messages[token_usage.covered_items:])
-    return estimate_text(instructions_provider()) + estimate_schema(tools) + estimate_items(session.messages)
+    return estimate_text(SYSTEM_PROMPT) + estimate_schema(tools) + estimate_items(session.messages)

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from openai import APIStatusError
 
 from src.common.common import extract_total_tokens, truncate_middle_to_budget
-from src.compact.constants import SUMMARY_PREFIX
+from src.prompt.compact import COMPACT_PROMPT, SUMMARY_PREFIX
 from src.compact.estimator import estimate_context, estimate_text
 from src.models.registry import ModelInfo
 
@@ -22,12 +22,6 @@ if TYPE_CHECKING:
 
 # 上下文压缩诊断日志记录器。
 logger = logging.getLogger(__name__)
-
-# 发送给摘要模型的中文交接指令，仅用于本次摘要请求，不写入会话历史。
-COMPACT_PROMPT = (
-    "请为继续当前任务的助手写一份简明交接摘要。保留用户目标和约束、已完成的工作、关键决定及原因、"
-    "相关文件和标识、工具已确认的结果、失败或未验证事项、下一步。根据历史区分已完成与计划中的动作，仅输出中文摘要。"
-)
 
 # 纯图片用户消息在压缩重建时的占位文本，避免兼容端点拒绝空内容 user 消息。
 OMITTED_IMAGE_PLACEHOLDER = "[历史图片已省略]"
@@ -182,15 +176,14 @@ class ContextCompactor:
         session: Session,
         *,
         phase: str,
-        instructions_provider: Callable[[], str],
         tools: Sequence[dict[str, Any]],
         on_status: Callable[[str], Awaitable[None]] | None = None,
     ) -> bool:
         """供轮前和轮内调用，在非空历史达到阈值时安装一次摘要并通知状态。"""
-        if not session.messages:
+        if not session.persisted or not session.messages:
             return False
         model_info, effective_window, limit = self._window_policy(session)
-        estimated = estimate_context(session, instructions_provider=instructions_provider, tools=tools)
+        estimated = estimate_context(session, tools=tools)
         if estimated < limit:
             return False
         logger.info(

@@ -6,13 +6,14 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
+from src.prompt.developer import SYSTEM_PROMPT
 from src.channels.base import InboundMessage
 from src.compact.compactor import ContextCompactor
 from src.config import Config
 from src.hook.hook import HookManager
 from src.memory.memory import extract_memories, load_memories, memory_messages
+from src.session.session import Session
 from src.session.session_manager import SessionManager
-from src.system_prompt import build_system_prompt
 from src.tools.local_tools import Plan
 from src.tools.tool import ToolContext
 from src.tools.tool_manager import ToolManager
@@ -43,6 +44,16 @@ class TurnRunner:
         self.hook_manager = hook_manager
         self.background_tasks = background_tasks
 
+    async def _append_turn_input(self, session: Session, text: str) -> None:
+        """构造本轮用户消息，按配置召回长期记忆，并将两者按顺序写入会话。"""
+        user_message = {"type": "message", "role": "user", "content": text}
+        # 进入工具循环前只召回一次，当前问题参与检索，召回结果写在该问题之前。
+        # 开启配置才进行长期记忆检索
+        relevant_memories = ""
+        if self.config.long_term_memory_enabled:
+            relevant_memories = await load_memories(self.client, [*memory_messages(session), user_message], self.config)
+        self.session_manager.append_turn_input(session, user_message, relevant_memories)
+
     # 核心
     async def run_turn(self, inbound_message: InboundMessage) -> None:
         """由调用方取得会话占用后，先完成轮前恢复与压缩检测，再落盘输入并循环执行本轮。"""
@@ -60,23 +71,18 @@ class TurnRunner:
             await self.compactor.maybe_compact(
                 session,
                 phase="pre_turn",
-                instructions_provider=lambda: build_system_prompt(self.config, tool_context.cwd),
                 tools=available_tools,
                 on_status=on_status,
             )
             # 在压缩后才加入用户输入，避免用户消息被压缩掉
-            self.session_manager.append_user_message(session, inbound_message.input)
-
+            await self._append_turn_input(session, inbound_message.input)
             messages = session.messages
-            # 进入工具循环前只召回一次相关记忆，本轮共用同一份动态系统提示词。
-            relevant_memories = await load_memories(self.client, memory_messages(session), self.config)
-            instructions = build_system_prompt(self.config, tool_context.cwd, relevant_memories)
             # 固定本轮使用的模型名称，也用于持久化元信息；优先采用当前会话绑定的 model_info。
             model_name = session.model_info.name if session.model_info is not None else self.config.model
             while True:
                 # 发送当前对话，请求模型继续推理或调用工具。
                 response = await self.client.responses.create(
-                    model=model_name, instructions=instructions, input=messages, tools=available_tools, parallel_tool_calls=True
+                    model=model_name, instructions=SYSTEM_PROMPT, input=messages, tools=available_tools, parallel_tool_calls=True
                 )
                 # 按响应原始顺序落盘并分发推理、工具调用和回答，然后才执行工具。
                 await self.session_manager.persist_and_dispatch_items(
@@ -106,7 +112,7 @@ class TurnRunner:
 
                 # 本轮需要下一次普通模型请求前，统一检测上下文是否达到自动压缩阈值。
                 await self.compactor.maybe_compact(
-                    session, phase="mid_turn", instructions_provider=lambda: instructions, tools=available_tools, on_status=on_status
+                    session, phase="mid_turn", tools=available_tools, on_status=on_status
                 )
         except BaseException:
             # todo: 正常请求超出上下文时，该ui提示
@@ -114,4 +120,5 @@ class TurnRunner:
             self.session_manager.reload(session)
             raise
         # Agent 正常结束后，提取本轮快照，不受后续追加和压缩影响。
-        self.background_tasks.append(asyncio.create_task(extract_memories(self.client, deepcopy(memory_messages(session)), self.config)))
+        if self.config.long_term_memory_enabled:
+            self.background_tasks.append(asyncio.create_task(extract_memories(self.client, deepcopy(memory_messages(session)), self.config)))

@@ -11,6 +11,9 @@ model_hosted_tools:
 - web_search
 - web_extractor
 
+# 是否提供长期记忆目录和工具，并启用轮前召回与轮末提取。
+long_term_memory_enabled: true
+
 # 上下文压缩相关配置（所有模型共用的策略参数）
 # 有效上下文窗口占模型原始窗口的百分比（1~100）。
 effective_window_percent: 95

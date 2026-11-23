@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from src.common.common import to_openai_tool_output
-from src.compact.constants import SUMMARY_PREFIX
+from src.prompt.compact import SUMMARY_PREFIX
 from src.session.session import Session, SessionTokenUsage
 from src.tools.tool import text_result
 
@@ -268,8 +268,6 @@ def append_items(
     is_error: bool | None = None, message_types: frozenset[str] = BASE_MESSAGE_TYPES,
 ) -> None:
     """按 API 原字段批量追加记录，整批校验通过后一次落盘；仅模型消息与推理附带模型名称。"""
-    if session.turn_id < 0:
-        raise ValueError("请先通过 persist_user_message 写入用户输入并开启新轮次")
     timestamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
     records = []
     for index, item in enumerate(items):
@@ -355,14 +353,16 @@ def append_compacted(
     _write_records(session, [record])
 
 
-def persist_user_message(session: Session, text: str) -> dict[str, Any]:
-    """递增 turn_id 并持久化真实用户输入，返回可追加到内存历史的消息。"""
+def persist_turn_input(session: Session, items: list[dict[str, str]]) -> None:
+    """开启新轮次，将前置说明与真实用户输入作为同一批消息持久化。"""
     if session.pending_calls:
         raise ValueError("写入新用户输入前，请先处理上次中断的工具调用")
     session.turn_id += 1
-    message = {"type": "message", "role": "user", "content": text}
-    append_items(session, [message])
-    return message
+    try:
+        append_items(session, items)
+    except Exception:
+        session.turn_id -= 1
+        raise
 
 
 def recover_pending_tools(session: Session) -> list[dict[str, Any]]:

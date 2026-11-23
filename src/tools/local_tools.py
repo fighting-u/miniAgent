@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from functools import partial
 
 from src.config import Config, PROJECT_ROOT
+from src.prompt.developer import CREATE_PLAN_REMINDER, UPDATE_PLAN_REMINDER
 from src.memory.memory import load_memory
 from src.tools.skill import SKILLS_DIR_NAME, SkillLoader
 from src.tools.tool import ImageContent, TextContent, ToolContext, ToolResult, text_result
@@ -228,14 +229,8 @@ class Plan:
         self._batches_without_update = 0
         logger.info("连续 %d 批工具调用未更新计划，向模型追加提醒", self.REMINDER_INTERVAL)
         if not self.items:
-            return (
-                f"系统提醒：当前已连续进行 {self.REMINDER_INTERVAL} 批工具调用，但尚未创建任务计划。"
-                "如果当前任务复杂或步骤较多，请使用 update_plan 创建计划。"
-            )
-        return (
-            f"系统提醒：已连续 {self.REMINDER_INTERVAL} 批工具调用未更新任务计划。"
-            f"请核对实际进度，如有变化请使用 update_plan 更新计划。\n当前计划：{self.render()}"
-        )
+            return CREATE_PLAN_REMINDER.format(interval=self.REMINDER_INTERVAL)
+        return UPDATE_PLAN_REMINDER.format(interval=self.REMINDER_INTERVAL, plan=self.render())
 
     def render(self) -> str:
         """把当前计划渲染为便于模型和终端阅读的文本。"""
@@ -396,26 +391,27 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
         description="按名称读取某项技能的完整说明。仅在技能适用于当前任务时调用。",
         parameters={
             "type": "object",
-            "properties": {"name": {"type": "string", "description": "系统提示词中列出的技能名称。"}},
+            "properties": {"name": {"type": "string", "description": "技能目录中列出的技能名称。"}},
             "required": ["name"],
             "additionalProperties": False,
         },
         strict=True,
     )
 
-    registry.register_local_tool(
-        name="load_memory",
-        supports_parallel=True,
-        func=load_memory,
-        description="根据系统提示词中的记忆文件名，按需读取一条长期记忆的完整内容。",
-        parameters={
-            "type": "object",
-            "properties": {"filename": {"type": "string", "description": "长期记忆目录中列出的 Markdown 文件名。"}},
-            "required": ["filename"],
-            "additionalProperties": False,
-        },
-        strict=True,
-    )
+    if config.long_term_memory_enabled:
+        registry.register_local_tool(
+            name="load_memory",
+            supports_parallel=True,
+            func=load_memory,
+            description="根据长期记忆目录中的文件名，按需读取一条长期记忆的完整内容。",
+            parameters={
+                "type": "object",
+                "properties": {"filename": {"type": "string", "description": "长期记忆目录中列出的 Markdown 文件名。"}},
+                "required": ["filename"],
+                "additionalProperties": False,
+            },
+            strict=True,
+        )
 
     registry.register_local_tool(
         name="get_model_name",

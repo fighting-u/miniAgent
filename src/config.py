@@ -27,6 +27,7 @@ class Config:
     channels: list[dict[str, Any]] = field(default_factory=list, repr=False)  # 通道实例配置，解析后可能包含密钥。
     mcp_servers: dict[str, Any] = field(default_factory=dict, repr=False)  # MCP 服务器配置，可能包含认证信息。
     model_hosted_tools: list[str] = field(default_factory=list)  # 由模型服务端执行的工具类型。
+    long_term_memory_enabled: bool = field(kw_only=True)  # 控制长期记忆目录、工具、召回和提取。
     effective_window_percent: int = field(kw_only=True)  # 有效上下文窗口占原始窗口的百分比（1~100）。
     auto_compact_percent: int = field(kw_only=True)  # 自动触发上下文压缩的百分比阈值（1~100）。
     compact_keep_user_tokens: int = field(kw_only=True)  # 压缩重建历史时保留用户原文的 token 预算上限。
@@ -53,6 +54,8 @@ class Config:
             raise ValueError("session_owner_ttl 必须为非负整数")
         if type(config.powershell_timeout) is not int or config.powershell_timeout <= 0:
             raise ValueError("powershell_timeout 必须为正整数")
+        if type(config.long_term_memory_enabled) is not bool:
+            raise ValueError("long_term_memory_enabled 必须为布尔值")
         if type(config.effective_window_percent) is not int or not 1 <= config.effective_window_percent <= 100:
             raise ValueError("effective_window_percent 必须为 1 到 100 之间的正整数")
         if type(config.auto_compact_percent) is not int or not 1 <= config.auto_compact_percent <= 100:

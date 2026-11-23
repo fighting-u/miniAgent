@@ -8,12 +8,15 @@ from typing import Any
 
 from uuid6 import uuid7
 
+from src.prompt.developer import MEMORY_CATALOG_PROMPT, RECALLED_MEMORY_PROMPT, SESSION_PROMPT
 from src.channels.base import InboundMessage, MessageDispatcher
 from src.common.common import extract_total_tokens
-from src.config import Config
+from src.config import PROJECT_ROOT, Config
+from src.memory.memory import memory_catalog
 from src.models.registry import get_model_info
 from src.session import storage
 from src.session.session import Session
+from src.tools.skill import SKILLS_DIR_NAME, SkillLoader
 
 # 会话加载、入口绑定和历史管理的诊断日志。
 logger = logging.getLogger(__name__)
@@ -30,6 +33,7 @@ class SessionManager:
     def __init__(self, root: Path, config: Config, message_dispatcher: MessageDispatcher) -> None:
         """接收会话目录和配置，保存占用保留秒数，一次读取绑定，历史按需加载。"""
         self.root = root  # 会话 JSONL 和 bindings 文件所在目录。
+        self.config = config  # 构建会话开头的目录权限和长期记忆说明。
         self.message_dispatcher = message_dispatcher  # 将已落盘的消息分发给来源通道。
         # 启动时校验默认模型已声明上下文窗口，供新建或加载会话初始化 model_info。
         self.default_model_info = get_model_info(config.model)
@@ -61,12 +65,25 @@ class SessionManager:
         logger.info("已加载会话：%s", session.id)
         return session
 
+    def _developer_messages(self) -> list[dict[str, str]]:
+        """为新会话或压缩后的历史生成当前环境、技能和可选的记忆目录快照。"""
+        cwd = Path.cwd().resolve()
+        allowed_dirs = "、".join(str(path) for path in dict.fromkeys((cwd, *self.config.allowed_dirs)))
+        content = SESSION_PROMPT.format(
+            cwd=cwd, allowed_dirs=allowed_dirs, skills=SkillLoader(PROJECT_ROOT / SKILLS_DIR_NAME).catalog()
+        )
+        messages = [{"type": "message", "role": "developer", "content": content}]
+        if self.config.long_term_memory_enabled:
+            messages.append({"type": "message", "role": "developer", "content": MEMORY_CATALOG_PROMPT.format(catalog=memory_catalog())})
+        return messages
+
     def get_or_create(self, session_id: str) -> Session:
         """普通对话按 ID 获取或懒创建会话，空 ID 时先生成标识。"""
         session_id = session_id or self.new_session_id()
         session = self.get(session_id)
         if session is None:
             session = storage.create(self.root, session_id)
+            session.messages.extend(self._developer_messages())
             session.model_info = self.default_model_info
             self.sessions[session.id] = session
             logger.info("首次输入已准备会话：%s", session.id)
@@ -131,11 +148,15 @@ class SessionManager:
         session.messages.extend(results)
         return results
 
-    def append_user_message(self, session: Session, text: str) -> dict[str, Any]:
-        """由调用方取得会话占用，递增 turn_id、持久化用户输入并追加到内存历史。"""
-        message = storage.persist_user_message(session, text)
-        session.messages.append(message)
-        return message
+    def append_turn_input(self, session: Session, user_message: dict[str, str], recalled_memories: str) -> None:
+        """同轮落盘召回内容和用户输入；首次输入一并写入暂存在内存中的会话前缀。"""
+        items = []
+        if recalled_memories:
+            content = RECALLED_MEMORY_PROMPT.format(memories=recalled_memories)
+            items.append({"type": "message", "role": "developer", "content": content})
+        items.append(user_message)
+        storage.persist_turn_input(session, items if session.persisted else [*session.messages, *items])
+        session.messages.extend(items)
 
     async def persist_and_dispatch_items(
         self, inbound_message: InboundMessage, session: Session, items: list[Any],
@@ -164,6 +185,7 @@ class SessionManager:
     def install_compacted(self, session: Session, replacement: list[dict[str, Any]], summary_tokens: int | None) -> None:
         """先向 JSONL 提交 compacted 检查点，落盘成功后原地替换内存历史并清空旧主基准。"""
         new_total = session.token_usage.total_reported_tokens + (summary_tokens or 0)
+        replacement = [*self._developer_messages(), *replacement]
         storage.append_compacted(session, replacement, summary_tokens=summary_tokens, total_reported_tokens=new_total)
         session.messages[:] = replacement
         session.summary_index = len(replacement) - 1
