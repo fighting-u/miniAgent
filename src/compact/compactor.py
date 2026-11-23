@@ -218,6 +218,15 @@ class ContextCompactor:
         limit = model_info.context_window * self.config.auto_compact_percent // 100
         return model_info, effective_window, limit
 
+    def format_window_usage(self, session: Session) -> str | None:
+        """用最近一次主响应用量生成窗口页脚，缺少用量时跳过。"""
+        used = session.token_usage.last_total_tokens
+        if used is None:
+            return None
+        _, effective_window, _ = self._window_policy(session)
+        used_text = str(used) if used < 1000 else f"{used / 1000:.0f}k"
+        return f"上下文窗口使用情况：已用 {used / effective_window:.0%}（{used_text} / {effective_window / 1000:.0f}k tokens）"
+
     async def maybe_compact(
         self,
         session: Session,

@@ -96,6 +96,7 @@ class TurnRunner:
                     # todo: 后续优化点，不简单以不调用工具为结束标志
                     if extra_input is None:
                         break
+
                     # Harness 的续跑要求属于系统提示，不冒充真实用户输入。
                     extra_message = {"role": "system", "content": extra_input}
                     await self.session_manager.persist_and_dispatch_items(inbound_message, session, [extra_message])

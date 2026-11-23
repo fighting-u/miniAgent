@@ -285,6 +285,8 @@ class QQChannel(Channel):
             await self._send_text(reply, event["text"])
         elif event_type == "done":
             try:
+                if reply.texts and "usage_text" in event:
+                    reply.texts.append(event["usage_text"])
                 await self._send_text(reply, "\n\n".join(reply.texts))
             finally:
                 self.replies.pop(event["request_id"], None)

@@ -157,6 +157,8 @@ class MessageProcessor:
 
     async def process_message(self, inbound_message: InboundMessage) -> None:
         """按输入类型分发，普通聊天优先匹配当前会话的待审批请求。"""
+        # todo: 优化done事件，event类型
+        context_window_usage = None
         try:
             inbound_message.input = inbound_message.input.strip()
             # todo: 优化太多If,else
@@ -194,10 +196,11 @@ class MessageProcessor:
                         self.session_manager.bind(inbound_message.channel_id, session.id)
                         trigger_hooks("PreUserPromptSubmit", Path.cwd().resolve())
                         await self.turn_runner.run_turn(inbound_message)
+                        context_window_usage = self.compactor.format_window_usage(session)
                 finally:
                     self.session_manager.release_session_lock(session)
         except Exception as error:
             logger.exception("请求处理失败：request=%s session=%s", inbound_message.request_id, inbound_message.session_id)
             await self.session_manager.message_dispatcher.send(inbound_message, {"type": "error", "text": str(error)})
         finally:
-            await self.session_manager.message_dispatcher.send(inbound_message, {"type": "done"})
+            await self.session_manager.message_dispatcher.send_done(inbound_message, context_window_usage)

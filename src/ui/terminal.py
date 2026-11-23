@@ -62,6 +62,8 @@ class TerminalClient:
                     "input": answer,
                 }))
             elif kind == "done":
+                if "usage_text" in event:
+                    print(event["usage_text"])
                 return events
 
     async def run(self) -> None:

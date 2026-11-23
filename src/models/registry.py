@@ -13,7 +13,7 @@ class ModelInfo:
 
 # 已声明的模型静态元信息注册表；新增可选模型时在此补充。
 MODELS: dict[str, ModelInfo] = {
-    "qwen3.7-flash": ModelInfo(name="qwen3.7-flash", context_window=1_000_000),
+    "qwen3.7-flash": ModelInfo(name="qwen3.7-flash", context_window=272_000),
 }
 
 
