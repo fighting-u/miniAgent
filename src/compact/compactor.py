@@ -10,6 +10,7 @@ from openai import APIStatusError
 
 from src.common.common import extract_total_tokens, truncate_middle_to_budget
 from src.prompt.compact import COMPACT_PROMPT, SUMMARY_PREFIX
+from src.prompt.developer import SYSTEM_PROMPT
 from src.compact.estimator import estimate_context, estimate_text
 from src.models.registry import ModelInfo
 
@@ -211,7 +212,9 @@ class ContextCompactor:
         # 猜测原因1.本来配置的最大窗口就不是真的最大窗口；2.预估不准确，尽量多地保留
         while True:
             try:
-                response = await self.client.responses.create(model=session.model_info.name, input=compaction_messages)
+                response = await self.client.responses.create(
+                    model=session.model_info.name, instructions=SYSTEM_PROMPT, input=compaction_messages
+                )
                 break
             except APIStatusError as error:
                 if not is_context_length_error(error):

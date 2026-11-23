@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 if TYPE_CHECKING:
     from src.tools.local_tools import Plan
 
+LOG_PREVIEW_CHARS = 200  # 日志及终端预览保留的最大文本字符数，不含省略号。
+
 
 @dataclass
 class ToolContext:
@@ -37,11 +39,11 @@ class ToolResult:
     is_error: bool = False
 
     def log_output(self) -> str:
-        """生成日志及终端预览，文本合计最多 50 字，图片只计数。"""
+        """生成日志及终端预览，合并并截断文本，图片只计数。"""
         texts = [block.text for block in self.content if isinstance(block, TextContent)]
         preview = " ".join(" ".join(texts).split())
-        if len(preview) > 50:
-            preview = preview[:50] + "…"
+        if len(preview) > LOG_PREVIEW_CHARS:
+            preview = preview[:LOG_PREVIEW_CHARS] + "…"
         if self.is_error:
             return f"工具执行失败，错误信息：{preview}"
         parts = ["执行成功"]

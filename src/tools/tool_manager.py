@@ -150,10 +150,10 @@ class ToolManager:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
-        # 整批工具结果之后追加 Hook 可能返回的系统消息。
+        # 整批工具结果之后，以 developer 消息追加 Hook 返回的提醒。
         extra_input = self._hook_manager.trigger("PostToolBatch", context)
         if extra_input:
-            extra_message = {"role": "system", "content": extra_input}
+            extra_message = {"role": "developer", "content": extra_input}
             await self.session_manager.persist_and_dispatch_items(
                 inbound_message, session, [extra_message],
             )

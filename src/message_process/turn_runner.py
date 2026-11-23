@@ -105,8 +105,8 @@ class TurnRunner:
                     if extra_input is None:
                         break
 
-                    # Harness 的续跑要求属于系统提示，不冒充真实用户输入。
-                    extra_message = {"role": "system", "content": extra_input}
+                    # Harness 的续跑要求以 developer 消息追加，与真实用户输入区分。
+                    extra_message = {"role": "developer", "content": extra_input}
                     await self.session_manager.persist_and_dispatch_items(inbound_message, session, [extra_message])
                     messages.append(extra_message)
 
