@@ -48,5 +48,6 @@ def setup_logging() -> Path:
 
     # 降低第三方 HTTP 客户端的常规请求日志，避免掩盖 Agent 自身事件。
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
     return CURRENT_LOG_PATH

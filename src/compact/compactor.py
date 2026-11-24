@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from openai import APIStatusError
 
-from src.common.common import extract_total_tokens, truncate_middle_to_budget
+from src.common.common import extract_total_tokens, log_llm_usage, truncate_middle_to_budget
 from src.prompt.compact import *
 from src.prompt.developer import SYSTEM_PROMPT
 from src.compact.estimator import estimate_context, estimate_text
@@ -215,6 +215,7 @@ class ContextCompactor:
                 response = await self.client.responses.create(
                     model=session.model_info.name, instructions=SYSTEM_PROMPT, input=compaction_messages
                 )
+                log_llm_usage("上下文压缩", response)
                 break
             except APIStatusError as error:
                 if not is_context_length_error(error):

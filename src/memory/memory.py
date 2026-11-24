@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from openai import AsyncOpenAI
 
+from src.common.common import log_llm_usage
 from src.prompt.memory import EXTRACT_INSTRUCTIONS, EXTRACT_PROMPT, RECALL_INSTRUCTIONS, RECALL_PROMPT
 from src.tools.tool import ToolResult, text_result
 from src.config import Config, PROJECT_ROOT
@@ -235,6 +236,7 @@ async def select_relevant_memories(
             input=prompt,
             max_output_tokens=200,
         )
+        log_llm_usage("记忆召回", response)
         selected = []
         for index in extract_json_array(response.output_text):
             if isinstance(index, int) and 0 <= index < len(records):
@@ -302,6 +304,7 @@ async def extract_memories(client: AsyncOpenAI, messages: list[Any], config: Con
             input=prompt,
             max_output_tokens=1200,
         )
+        log_llm_usage("记忆提取", response)
         stored = 0
         for item in extract_json_array(response.output_text):
             if not isinstance(item, dict):

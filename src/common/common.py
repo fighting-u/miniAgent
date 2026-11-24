@@ -1,12 +1,21 @@
 import logging
 from typing import Any
 
+from openai.types.responses import Response
+
 from src.compact.estimator import estimate_text
 from src.tools.tool import TextContent, ToolResult
 
 
 # 记录模型响应的用量字段异常。
 logger = logging.getLogger(__name__)
+
+
+def log_llm_usage(purpose: str, response: Response) -> None:
+    """逐笔记录模型返回的 token 用量，保留服务端提供的各项明细。"""
+    usage = response.usage
+    details = usage.model_dump_json(exclude_none=True, exclude_unset=True) if usage is not None else "服务端未返回用量"
+    logger.info("LLM 用量 | 用途=%s model=%s usage=%s", purpose, response.model, details)
 
 
 def extract_total_tokens(usage: Any) -> int | None:

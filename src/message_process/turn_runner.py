@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from src.prompt.developer import SYSTEM_PROMPT
 from src.channels.base import InboundMessage
+from src.common.common import log_llm_usage
 from src.compact.compactor import ContextCompactor
 from src.config import Config
 from src.hook.hook import HookManager
@@ -84,6 +85,7 @@ class TurnRunner:
                 response = await self.client.responses.create(
                     model=model_name, instructions=SYSTEM_PROMPT, input=messages, tools=available_tools, parallel_tool_calls=True
                 )
+                log_llm_usage("主对话", response)
                 # 按响应原始顺序落盘并分发推理、工具调用和回答，然后才执行工具。
                 await self.session_manager.persist_and_dispatch_items(
                     inbound_message, session, response.output, model_name=model_name
