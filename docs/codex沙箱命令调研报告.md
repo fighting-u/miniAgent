@@ -111,3 +111,21 @@ elevated和unelevated均不可实现配置文件夹可读写，其他位置读�
 
 `codex sandbox uninstall` 是管理子命令，用于移除传统 Windows 沙箱建立的机器级账号与网络规则，需管理员权限。单次命令结束时无需运行它。[官方 CLI 参考](https://developers.openai.com/codex/cli/reference/#codex-sandbox) · [本地参数定义](D:/projects/others/codex/codex-rs/cli/src/lib.rs:29)
 
+## 测试
+```powershell
+codex sandbox `
+    -c windows.sandbox=mxc `
+    -c 'permissions.miniagent.filesystem={":minimal"="read","D:/"="write"}' `
+    -P miniagent `
+    -C "D:/" `
+    -- powershell.exe -NoProfile -Command "Get-ChildItem D:/"
+```
+报错`Error: failed to prepare MXC sandbox: permission path cannot be represented losslessly`，这应该是尚未成熟的bug，而不是设计上就不允许，等以后修复吧
+```powershell
+codex sandbox `
+    -c windows.sandbox=mxc `
+    -c 'permissions.miniagent.filesystem={":minimal"="read","D:/Go"="write"}' `
+    -P miniagent `
+    -C "D:/" `
+    -- powershell.exe -NoProfile -Command "Get-ChildItem D:/Go"
+```
