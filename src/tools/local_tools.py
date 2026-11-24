@@ -2,6 +2,8 @@ import ast
 import base64
 import json
 import logging
+import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 import subprocess
@@ -38,12 +40,23 @@ def run_get_current_time() -> ToolResult:
     return text_result(datetime.now().astimezone().isoformat(timespec="seconds"))
 
 
-def run_powershell(command: str, workdir: str | None = None, *, timeout: int, context: ToolContext) -> ToolResult:
-    """在本次调用的工作目录执行 PowerShell，并返回退出状态和输出。"""
+def run_powershell(command: str, workdir: str | None = None, *, timeout: int,
+                   allowed_dirs: tuple[Path, ...], context: ToolContext) -> ToolResult:
+    """在 MXC 沙箱内执行 PowerShell，允许读写配置的目录、用户审批通过的workdir和本次工作目录cwd。"""
     try:
         cwd = resolve_path(workdir if workdir is not None else ".", context)
-        completed = subprocess.run(
+        roots = dict.fromkeys((*allowed_dirs, context.cwd.resolve(), cwd))
+        # TOML 内联表的路径键单独加引号，整个策略作为一个 CLI 参数传递。
+        rules = ['":minimal"="read"']  # 为 PowerShell 和子进程开放基础运行环境的读取权限。
+        rules.extend(f'{json.dumps(path.as_posix(), ensure_ascii=False)}="write"' for path in roots)
+        codex = shutil.which("codex.exe")
+        if codex is None:
+            raise FileNotFoundError("PATH 中找不到 codex.exe")
+        with subprocess.Popen(
             [
+                codex, "-c", "windows.sandbox=mxc", "sandbox",
+                "-c", "permissions.miniagent.filesystem={" + ", ".join(rules) + "}",
+                "-P", "miniagent", "--include-managed-config", "--",
                 "powershell.exe",
                 "-NoLogo",
                 "-NoProfile",
@@ -52,27 +65,40 @@ def run_powershell(command: str, workdir: str | None = None, *, timeout: int, co
                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + command,
             ],
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-        output = json.dumps({"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}, ensure_ascii=False)
-        return text_result(output, is_error=completed.returncode != 0)
-    except subprocess.TimeoutExpired as error:
-        def partial_text(value: bytes | str | None) -> str:
-            """解码超时前已捕获的命令输出。"""
-            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value or ""
-
-        output = json.dumps({"error": f"PowerShell 执行超过 {timeout} 秒，已终止。",
-                             "stdout": partial_text(error.stdout), "stderr": partial_text(error.stderr)}, ensure_ascii=False)
-        return text_result(output, is_error=True)
+        ) as process:
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # Windows 上单独结束 Codex 会留下正在执行命令的子进程。
+                taskkill = Path(os.environ["SystemRoot"]) / "System32" / "taskkill.exe"
+                killed = subprocess.run([taskkill, "/PID", str(process.pid), "/T", "/F"], capture_output=True)
+                if killed.returncode and process.poll() is None:
+                    logger.error("终止 MXC 进程树失败，PID=%s，退出码=%s", process.pid, killed.returncode)
+                    process.kill()
+                    return text_result(f"PowerShell 执行超过 {timeout} 秒，无法确认子进程已终止。", is_error=True)
+                stdout, stderr = process.communicate()
+                logger.warning("MXC PowerShell 执行超时，限时 %s 秒", timeout)
+                output = {"error": f"PowerShell 执行超过 {timeout} 秒，已终止。", "stdout": stdout, "stderr": stderr}
+                return text_result(json.dumps(output, ensure_ascii=False), is_error=True)
+        output = {"exit_code": process.returncode, "stdout": stdout, "stderr": stderr}
+        # PowerShell 非终止错误可能留下退出码 0，仍需向模型报告明确的权限错误。
+        diagnostics = "\n".join(line for line in stderr.casefold().splitlines() if not line.startswith("warning:"))
+        denied = any(marker in diagnostics for marker in
+                     ("unauthorizedaccess", "permissiondenied", "access is denied", "permission denied", "拒绝访问"))
+        if denied:
+            output["error"] = "沙箱不允许该操作，权限不足。请向用户说明操作未能完成；若 stderr 指明了被拒绝的路径，请一并告知。"
+            logger.warning("PowerShell 操作被拒绝，工作目录：%s", cwd)
+        return text_result(json.dumps(output, ensure_ascii=False), is_error=denied or process.returncode != 0)
     except ValueError as error:
         return text_result(str(error), is_error=True)
     except OSError as error:
-        return text_result(f"无法启动 PowerShell：{error}", is_error=True)
+        logger.error("无法启动 MXC PowerShell：%s", error)
+        return text_result(f"无法启动 MXC PowerShell：{error}", is_error=True)
 
 
 def run_read(path: str, limit: int | None = None, *, context: ToolContext) -> ToolResult:
@@ -268,7 +294,7 @@ def register_local_tools(registry: "ToolManager", config: Config) -> None:
     # 提供给模型的工具定义；parameters 使用 JSON Schema 描述模型可传入的参数。
     registry.register_local_tool(
         name="powershell",
-        func=partial(run_powershell, timeout=config.powershell_timeout),
+        func=partial(run_powershell, timeout=config.powershell_timeout, allowed_dirs=config.allowed_dirs),
         description="执行 PowerShell 命令。",
         parameters={
             "type": "object",
