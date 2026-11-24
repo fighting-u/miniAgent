@@ -40,6 +40,25 @@ def run_get_current_time() -> ToolResult:
     return text_result(datetime.now().astimezone().isoformat(timespec="seconds"))
 
 
+def resolve_codex_executable() -> Path:
+    """优先使用 PATH 中的原生 Codex，否则从 npm 全局安装目录定位原生程序。"""
+    executable = shutil.which("codex.exe")
+    if executable:
+        return Path(executable)
+
+    launcher = shutil.which("codex.cmd")
+    if not launcher:
+        raise FileNotFoundError("PATH 中找不到 codex.exe 或 npm 启动器 codex.cmd")
+    package = Path(launcher).parent / "node_modules/@openai/codex"
+    for pattern in ("node_modules/@openai/codex-win32-*/vendor/*-pc-windows-msvc/bin/codex.exe",
+                    "vendor/*-pc-windows-msvc/bin/codex.exe"):
+        for binary in package.glob(pattern):
+            if binary.is_file():
+                logger.debug("使用 npm 安装的原生 Codex：%s", binary)
+                return binary
+    raise FileNotFoundError(f"已找到 {launcher}，但在 {package} 中找不到原生 codex.exe")
+
+
 def run_powershell(command: str, workdir: str | None = None, *, timeout: int,
                    allowed_dirs: tuple[Path, ...], context: ToolContext) -> ToolResult:
     """在 MXC 沙箱内执行 PowerShell，允许读写配置的目录、用户审批通过的workdir和本次工作目录cwd。"""
@@ -49,9 +68,7 @@ def run_powershell(command: str, workdir: str | None = None, *, timeout: int,
         # TOML 内联表的路径键单独加引号，整个策略作为一个 CLI 参数传递。
         rules = ['":minimal"="read"']  # 为 PowerShell 和子进程开放基础运行环境的读取权限。
         rules.extend(f'{json.dumps(path.as_posix(), ensure_ascii=False)}="write"' for path in roots)
-        codex = shutil.which("codex.exe")
-        if codex is None:
-            raise FileNotFoundError("PATH 中找不到 codex.exe")
+        codex = resolve_codex_executable()
         with subprocess.Popen(
             [
                 codex, "-c", "windows.sandbox=mxc", "sandbox",
