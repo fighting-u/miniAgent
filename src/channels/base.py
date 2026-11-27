@@ -39,6 +39,8 @@ class InboundMessage:
 Submit = Callable[[InboundMessage], None]
 
 
+# 不定义receive抽象方法，因为1通道监听输入是通道自己的事，receive参数不好统一；
+# 2没有别的组件会去调用receive方法；提供了submit回调函数就已经保证了统一的提交
 class Channel(ABC):
     """通道统一接口，不限定主动连接或被动监听。"""
 

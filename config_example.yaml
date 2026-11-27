@@ -1,10 +1,9 @@
-# model相关配置
-# 模型密钥仍从本地 .env 中的 api_key_env 变量读取（当前使用 Qwen）。
-# 主模型、记忆辅助模型与压缩模型共用的名称。
+# model 相关配置
+# 主模型、记忆辅助模型与压缩模型共用的名称（需在 src/models/registry.py 中已注册）。
 model: qwen3.7-flash
 # OpenAI 兼容服务地址，null 表示使用 SDK 默认值。
 base_url: https://maas.qianwenaiapi.com/compatible-mode/v1
-# 模型密钥的环境变量名；密钥值保留在本地 .env。
+# 模型密钥的环境变量名；密钥值保存在本地 .env 中。
 api_key_env: DASHSCOPE_API_KEY
 # 由模型服务端执行的工具类型；网页抓取 web_extractor 需与联网搜索 web_search 同时启用。
 model_hosted_tools:
@@ -22,24 +21,23 @@ auto_compact_percent: 90
 # 压缩重建历史时，最多保留的用户原话 token 预算上限。
 compact_keep_user_tokens: 20000
 
-
 # 工具权限相关配置
-# 单个工具文本输出块的 token 上限，超出时首尾截断并将完整内容转存到 /.task_outputs。
+# 单个工具文本输出块的 token 上限，超出时首尾截断并将完整内容转存到 .task_outputs。
 tool_output_max_tokens: 10000
 # PowerShell 单次执行的最长秒数。
 powershell_timeout: 120
-# 允许目录及其子目录，相对路径以本配置文件所在目录为基准。
+# 允许访问的目录及其子目录，相对路径以本配置文件所在目录为基准。
 allowed_dirs:
 - .
-- D:/projects
+# - D:/projects
 
 # AgentRuntime 同时处理请求的最大数量。
 max_concurrent_requests: 10
 # 会话执行结束后，原来源继续占用的秒数；0 表示结束后立即允许其他来源接管。
 session_owner_ttl: 60
 
-# 通道channel相关配置
-# id 标识每个实例，type 表示tunnel类型，enabled 控制启动。
+# 通道 channel 相关配置
+# id 标识每个实例，type 表示通道类型，enabled 控制是否启用。
 channels:
 - id: terminal_main
   type: terminal
@@ -54,8 +52,8 @@ channels:
     app_id_env: QQ_APP_ID
     secret_env: QQ_APP_SECRET
     is_sandbox: false
-    
-# MCP 服务器定义；支持 stdio 与 Streamable HTTP。
+
+# MCP 服务器定义；支持 stdio 与 Streamable HTTP，无配置时保持空对象 {}。
 mcp_servers:
   interview_post_crawl:
     type: http
